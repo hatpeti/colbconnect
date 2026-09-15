@@ -849,7 +849,13 @@ async def handle_leech(client, message):
         if not t_file: return await status_msg.edit_text("❌ Failed to fetch torrent metadata.")
         
         global aria2_api
-        meta_dl = aria2_api.add_torrent(t_file, options={"pause": "true"})
+        
+        # Make a copy of the .torrent file for metadata extraction so it doesn't get deleted
+        t_file_meta = t_file + ".meta.torrent"
+        import shutil
+        shutil.copy(t_file, t_file_meta)
+        
+        meta_dl = aria2_api.add_torrent(t_file_meta, options={"pause": "true"})
         files, t_name = meta_dl.files, meta_dl.name
         aria2_api.remove([meta_dl], force=True, files=False)
         
