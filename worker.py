@@ -497,14 +497,41 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
         success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "📝 Adding Subtitle", filename)
         if success: files_to_upload.append(await apply_mkv_watermark(out_path))
     elif action == "extract_sub":
-        out_path = os.path.join(os.path.dirname(filepath), os.path.splitext(filename)[0] + ".srt")
-        cmd = ["ffmpeg", "-y", "-i", filepath, "-map", "0:s:0?", out_path]
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await proc.communicate()
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            files_to_upload.append(out_path)
+        import json
+        proc = await asyncio.create_subprocess_exec("mkvmerge", "-J", filepath, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        stdout, _ = await proc.communicate()
+        sub_tracks = []
+        try:
+            info = json.loads(stdout)
+            for track in info.get("tracks", []):
+                if track.get("type") == "subtitles":
+                    codec = track.get("codec", "").lower()
+                    ext = ".srt" if "subrip" in codec else ".ass" if "substation" in codec else ".sup" if "pgs" in codec else ".vobsub" if "vobsub" in codec else ".srt"
+                    sub_tracks.append((track["id"], ext, track.get("properties", {}).get("language", "und")))
+        except Exception as e:
+            logger.error(f"Error parsing mkvmerge: {e}")
+            
+        if not sub_tracks:
+            await client.send_message(chat_id, f"⚠️ <b>No subtitles found</b> or file is not MKV: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
         else:
-            await client.send_message(chat_id, f"⚠️ <b>No subtitle found</b> or could not extract from: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
+            base_name = os.path.splitext(filename)[0]
+            extract_args = []
+            extracted_files = []
+            for i, (tid, ext, lang) in enumerate(sub_tracks):
+                out_path = os.path.join(os.path.dirname(filepath), f"{base_name}_track{tid}_{lang}{ext}")
+                extract_args.extend([f"{tid}:{out_path}"])
+                extracted_files.append(out_path)
+                
+            cmd = ["mkvextract", "tracks", filepath] + extract_args
+            ex_proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await ex_proc.communicate()
+            
+            for out_path in extracted_files:
+                if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                    files_to_upload.append(out_path)
+                    
+            if not files_to_upload:
+                await client.send_message(chat_id, f"⚠️ <b>Failed to extract subtitles</b> from: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
     elif action == "addaudio" and audio_path:
         out_path = os.path.join(os.path.dirname(filepath), "audio_" + filename)
         cmd = ["ffmpeg", "-y", "-i", filepath, "-i", audio_path, "-c", "copy", "-map", "0:v", "-map", "0:a?", "-map", "1:a", "-map", "0:s?", out_path]
