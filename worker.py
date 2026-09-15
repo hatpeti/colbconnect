@@ -61,6 +61,7 @@ upload_runtime = {}
 current_tasks = {}
 pending_sub_replies = {}
 pending_audio_replies = {}
+pending_renames = {}
 
 _prev_cpu_times = [0.0, 0.0]
 
@@ -424,9 +425,12 @@ def get_panel_markup(task_id):
          btn("720p", f"panel_720_{task_id}", style=enums.ButtonStyle.PRIMARY),
          btn("1080p", f"panel_1080_{task_id}", style=enums.ButtonStyle.PRIMARY)],
         [btn("✂️ Remove Sub", f"panel_removesub_{task_id}", style=enums.ButtonStyle.DEFAULT),
-         btn("📝 Add Sub", f"panel_addsub_{task_id}", style=enums.ButtonStyle.DEFAULT)],
-        [btn("🔄 Re-encode All", f"panel_reencode_{task_id}", style=enums.ButtonStyle.PRIMARY)],
-        [btn("🚀 Upload Now", f"panel_upload_{task_id}", style=enums.ButtonStyle.SUCCESS)],
+         btn("📝 Add Sub", f"panel_addsub_{task_id}", style=enums.ButtonStyle.DEFAULT),
+         btn("🔍 Extract Sub", f"panel_extract_sub_{task_id}", style=enums.ButtonStyle.DEFAULT)],
+        [btn("🎵 Extract Audio", f"panel_extract_audio_{task_id}", style=enums.ButtonStyle.DEFAULT),
+         btn("✏️ Rename", f"panel_rename_{task_id}", style=enums.ButtonStyle.SUCCESS)],
+        [btn("🔄 Re-encode All", f"panel_reencode_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("🚀 Upload Now", f"panel_upload_{task_id}", style=enums.ButtonStyle.SUCCESS)],
         [btn("❌ Cancel", f"panel_cancel_{task_id}", style=enums.ButtonStyle.DANGER)]
     ])
 
@@ -593,7 +597,8 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
             logger.error(f"Upload error: {e}")
 
 # --- EXECUTE TASK WORKER WITH SEMAPHORE ---
-async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, is_telegram_file=False, sub_path=None, audio_path=None):
+async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, is_telegram_file=False, sub_path=None, audio_path=None, custom_renames=None):
+    if custom_renames is None: custom_renames = {}
     async with TASK_SEMAPHORE:
         try:
             cancel_flags[task_id] = False
@@ -630,11 +635,12 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                     ACTIVE_TASKS[task_id]["eta"] = (total - current) / ACTIVE_TASKS[task_id]["speed"] if ACTIVE_TASKS[task_id]["speed"] > 0 else 0
 
                 path = await client.download_media(media_msg, file_name=path, progress=tg_progress)
-                await process_media_file(client, chat_id, path, action, {}, 1, task_id, sub_path, audio_path)
+                await process_media_file(client, chat_id, path, action, custom_renames, 1, task_id, sub_path, audio_path)
                 shutil.rmtree(dl_dir, ignore_errors=True)
 
             elif not is_telegram_file and task_id in current_tasks:
                 t_data = current_tasks.pop(task_id)
+                if not custom_renames: custom_renames = t_data.get("custom_renames", {})
                 dl_dir = f"/content/dl_{task_id}"
                 os.makedirs(dl_dir, exist_ok=True)
                 global aria2_api
@@ -674,7 +680,7 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                 if not cancel_flags.get(task_id):
                     for f in dl.files:
                         if getattr(f, "selected", False) and os.path.exists(str(f.path)):
-                            await process_media_file(client, chat_id, str(f.path), action, {}, f.index, task_id)
+                            await process_media_file(client, chat_id, str(f.path), action, custom_renames, f.index, task_id)
                 shutil.rmtree(dl_dir, ignore_errors=True)
 
         except asyncio.CancelledError:
@@ -793,7 +799,25 @@ async def reply_handler(client, message):
     if not message.reply_to_message: return
     r_id = str(message.reply_to_message.id)
     text = (message.text or message.caption or "").strip().lower()
-    
+    # Check pending rename reply
+    if r_id in pending_renames:
+        r_data = pending_renames.pop(r_id)
+        new_name = text
+        task_id = r_data["task_id"]
+        
+        if r_data["is_tg"]:
+            media_msg = r_data["media_msg"]
+            asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, "upload", media_msg=media_msg, is_telegram_file=True, custom_renames={1: new_name}))
+        else:
+            if task_id in current_tasks:
+                if "custom_renames" not in current_tasks[task_id]:
+                    current_tasks[task_id]["custom_renames"] = {}
+                sel = current_tasks[task_id]["selected"]
+                if len(sel) == 1:
+                    current_tasks[task_id]["custom_renames"][sel[0]] = new_name
+                await message.reply("✅ <b>File renamed!</b> Choose action from panel.", parse_mode=enums.ParseMode.HTML)
+        return
+
     # Check pending subtitle reply
     if r_id in pending_sub_replies and (message.document or message.video):
         media_msg = pending_sub_replies.pop(r_id)
@@ -864,6 +888,13 @@ async def cb_handler(client, cb):
             await cb.message.edit_reply_markup(None)
             prompt = await cb.message.reply("📝 <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
             pending_sub_replies[str(prompt.id)] = cb.message.reply_to_message
+            return
+
+        if action == "rename":
+            await cb.message.edit_reply_markup(None)
+            prompt = await cb.message.reply("✏️ <b>Please reply to THIS message with the NEW NAME (with extension, e.g. video.mkv):</b>", parse_mode=enums.ParseMode.HTML)
+            is_tg = (task_id not in current_tasks)
+            pending_renames[str(prompt.id)] = {"task_id": task_id, "is_tg": is_tg, "media_msg": cb.message.reply_to_message}
             return
 
         await cb.message.edit_reply_markup(None)
