@@ -22,13 +22,16 @@ user_app = None
 if PREMIUM_SESSION:
     user_app = Client("premium_uploader", api_id=API_ID, api_hash=API_HASH, session_string=PREMIUM_SESSION)
 
-async def download_torrent(magnet_link: str, download_dir: str = "./downloads"):
+import time
+
+async def download_torrent(magnet_link: str, download_dir: str = "./downloads", status_callback=None):
     os.makedirs(download_dir, exist_ok=True)
     # Using aria2c for fast downloading
     cmd = [
         "aria2c",
         "--seed-time=0",
         "--dir", download_dir,
+        "--summary-interval=3",
         magnet_link
     ]
     process = await asyncio.create_subprocess_exec(
@@ -36,7 +39,20 @@ async def download_torrent(magnet_link: str, download_dir: str = "./downloads"):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
-    await process.communicate()
+    
+    # Read output line by line for live status
+    while True:
+        line = await process.stdout.readline()
+        if not line:
+            break
+        line_str = line.decode('utf-8', errors='ignore').strip()
+        
+        # aria2c progress line looks like: [#xxxxxx 10MiB/100MiB(10%) CN:1 SD:1 DL:1MiB ETA:1m]
+        if line_str.startswith("[#") and status_callback:
+            # We don't await the callback to avoid blocking the stdout reader
+            asyncio.create_task(status_callback(line_str))
+            
+    await process.wait()
     if process.returncode == 0:
         logger.info("Download completed!")
         files = os.listdir(download_dir)
@@ -51,9 +67,22 @@ async def handle_leech(client, message):
         return
 
     magnet_link = message.command[1]
-    status_msg = await message.reply("🚀 **Colab Worker is downloading the file...**\nUsing aria2c for maximum speed!")
+    status_msg = await message.reply("🚀 **Colab Worker is starting download...**\n`Connecting to peers...`")
     
-    downloaded_file = await download_torrent(magnet_link)
+    last_update_time = 0
+    
+    async def progress_update(progress_str):
+        nonlocal last_update_time
+        current_time = time.time()
+        # Update message at most every 4 seconds to avoid Telegram flood limits
+        if current_time - last_update_time > 4:
+            try:
+                await status_msg.edit_text(f"🚀 **Downloading...**\n\n`{progress_str}`")
+                last_update_time = current_time
+            except Exception:
+                pass
+    
+    downloaded_file = await download_torrent(magnet_link, status_callback=progress_update)
     
     if not downloaded_file:
         await status_msg.edit_text("❌ **Download Failed!** Please check the magnet link.")
