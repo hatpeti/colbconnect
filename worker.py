@@ -498,10 +498,13 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
         if success: files_to_upload.append(await apply_mkv_watermark(out_path))
     elif action == "extract_sub":
         out_path = os.path.join(os.path.dirname(filepath), os.path.splitext(filename)[0] + ".srt")
-        cmd = ["ffmpeg", "-y", "-i", filepath, "-map", "0:s:0", out_path]
-        proc = await asyncio.create_subprocess_exec(*cmd)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-map", "0:s:0?", out_path]
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await proc.communicate()
-        if os.path.exists(out_path): files_to_upload.append(out_path)
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            files_to_upload.append(out_path)
+        else:
+            await client.send_message(chat_id, f"⚠️ <b>No subtitle found</b> or could not extract from: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
     elif action == "addaudio" and audio_path:
         out_path = os.path.join(os.path.dirname(filepath), "audio_" + filename)
         cmd = ["ffmpeg", "-y", "-i", filepath, "-i", audio_path, "-c", "copy", "-map", "0:v", "-map", "0:a?", "-map", "1:a", "-map", "0:s?", out_path]
