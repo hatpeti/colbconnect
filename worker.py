@@ -465,7 +465,12 @@ async def help_cmd(client, message):
 # --- PROCESS MEDIA PIPELINE (CONCURRENCY CONTROLLED) ---
 async def process_media_file(client, chat_id, filepath, action, custom_renames, file_index, task_id, sub_path=None, audio_path=None):
     filename = os.path.basename(filepath)
-    if file_index in custom_renames: filename = custom_renames[file_index]
+    if file_index in custom_renames:
+        new_filename = custom_renames[file_index]
+        new_filepath = os.path.join(os.path.dirname(filepath), new_filename)
+        os.rename(filepath, new_filepath)
+        filepath = new_filepath
+        filename = new_filename
     
     # 1. Apply MKV Watermark
     filepath = await apply_mkv_watermark(filepath)
@@ -828,11 +833,12 @@ async def handle_leech(client, message):
 async def reply_handler(client, message):
     if not message.reply_to_message: return
     r_id = str(message.reply_to_message.id)
-    text = (message.text or message.caption or "").strip().lower()
+    raw_text = (message.text or message.caption or "").strip()
+    text = raw_text.lower()
     # Check pending rename reply
     if r_id in pending_renames:
         r_data = pending_renames.pop(r_id)
-        new_name = text
+        new_name = raw_text
         task_id = r_data["task_id"]
         
         if r_data["is_tg"]:
