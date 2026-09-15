@@ -414,166 +414,6 @@ async def encode_video(input_path, output_path, resolution, total_duration, task
     cmd = ["ffmpeg", "-y", "-hwaccel", "auto", "-i", input_path, "-vf", scale, *vcodec, "-c:a", "copy", "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-c:s", "copy", "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path]
     return await run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action, filename)
 
-# --- UPLOAD OPERATIONS (DOCUMENT / FORCE FILE) ---
-async def upload_part(client, fd, file_id, part_no, total_parts, file_size, is_big, cancel_event):
-    offset = part_no * PART_SIZE
-    size_to_read = min(PART_SIZE, file_size - offset)
-    if size_to_read <= 0: return 0
-    data = await asyncio.to_thread(os.pread, fd, size_to_read, offset)
-    if cancel_event.is_set(): raise asyncio.CancelledError
-    
-    last_error = None
-    for attempt in range(1, PART_RETRIES + 1):
-        if cancel_event.is_set(): raise asyncio.CancelledError
-        try:
-            if is_big: result = await client.invoke(raw.functions.upload.SaveBigFilePart(file_id=file_id, file_part=part_no, file_total_parts=total_parts, bytes=data))
-            else: result = await client.invoke(raw.functions.upload.SaveFilePart(file_id=file_id, file_part=part_no, bytes=data))
-            if result: return len(data)
-        except FloodWait as e:
-            await asyncio.sleep(min(int(getattr(e, "value", 0)), 300))
-        except Exception as e:
-            last_error = e
-            if attempt >= PART_RETRIES: break
-            await asyncio.sleep(min(2.0, 0.15 * (2 ** (attempt - 1))))
-    raise RuntimeError(f"Part {part_no} failed: {last_error}")
-
-async def parallel_upload_file(path, filename, task_id):
-    global upload_client
-    file_size = os.path.getsize(path)
-    is_big = file_size > BIG_FILE_THRESHOLD
-    total_parts = math.ceil(file_size / PART_SIZE)
-    worker_count = min(UPLOAD_WORKERS, total_parts)
-    cancel_event = asyncio.Event()
-
-    runtime = {"cancel_event": cancel_event, "upload_tasks": set(), "progress_task": None}
-    upload_runtime[task_id] = runtime
-    file_id = random.randint(-2**63, 2**63 - 1)
-    queue = asyncio.Queue()
-    for p in range(total_parts): queue.put_nowait(p)
-
-    state = {"uploaded": 0, "lock": asyncio.Lock(), "last_bytes": 0, "last_time": time.time()}
-    start_time = time.time()
-
-    if task_id in ACTIVE_TASKS:
-        ACTIVE_TASKS[task_id].update({
-            "status": "📤 Uploading Document",
-            "filename": filename,
-            "current": 0,
-            "total": file_size,
-            "is_time": False,
-            "start_time": start_time,
-            "speed": 0,
-            "eta": 0
-        })
-
-    async def progress_pump():
-        while not cancel_event.is_set():
-            await asyncio.sleep(1.0)
-            current = state["uploaded"]
-            now = time.time()
-            elapsed = max(now - start_time, 0.001)
-            speed = current / elapsed
-            eta = max(file_size - current, 0) / speed if speed > 0 else 0
-            if task_id in ACTIVE_TASKS:
-                ACTIVE_TASKS[task_id].update({
-                    "current": current,
-                    "speed": speed,
-                    "eta": eta
-                })
-            if current >= file_size: break
-
-    runtime["progress_task"] = asyncio.create_task(progress_pump())
-    fd = os.open(path, os.O_RDONLY)
-
-    async def worker():
-        while not cancel_event.is_set():
-            try: part_no = queue.get_nowait()
-            except: return
-            try:
-                sent_bytes = await upload_part(upload_client, fd, file_id, part_no, total_parts, file_size, is_big, cancel_event)
-                async with state["lock"]: state["uploaded"] += sent_bytes
-            except:
-                cancel_event.set()
-                raise
-            finally: queue.task_done()
-
-    try:
-        tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
-        runtime["upload_tasks"] = set(tasks)
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if cancel_event.is_set(): raise asyncio.CancelledError
-        if is_big: input_file = raw.types.InputFileBig(id=file_id, parts=total_parts, name=filename)
-        else: input_file = raw.types.InputFile(id=file_id, parts=total_parts, name=filename, md5_checksum="")
-        return input_file
-    finally:
-        cancel_event.set()
-        with contextlib.suppress(Exception): os.close(fd)
-        if runtime.get("progress_task"): runtime["progress_task"].cancel()
-        upload_runtime.pop(task_id, None)
-
-async def send_uploaded_media(chat_id, input_file, filename, thumb_path, caption):
-    sender = upload_client
-    thumb = None
-    if thumb_path and os.path.exists(thumb_path):
-        with contextlib.suppress(Exception):
-            thumb = await sender.save_file(thumb_path)
-
-    # Force document / file upload (no streaming flag)
-    media = raw.types.InputMediaUploadedDocument(
-        file=input_file,
-        thumb=thumb,
-        mime_type=get_mime_type(filename),
-        attributes=[raw.types.DocumentAttributeFilename(file_name=filename)],
-        force_file=True
-    )
-
-    msg_id = None
-    # 1. Send first to chat_id (source user or group)
-    try:
-        peer = await sender.resolve_peer(chat_id)
-        parsed = await sender.parser.parse(caption or f"<code>{filename}</code>", enums.ParseMode.HTML)
-        res = await sender.invoke(
-            raw.functions.messages.SendMedia(
-                peer=peer,
-                media=media,
-                message=parsed.get("message", ""),
-                entities=parsed.get("entities", None),
-                random_id=sender.rnd_id()
-            )
-        )
-        for update in getattr(res, "updates", []):
-            m = getattr(update, "message", None)
-            if m and getattr(m, "id", None):
-                msg_id = m.id
-                break
-        if not msg_id and hasattr(res, "id"):
-            msg_id = res.id
-        logger.info(f"Successfully delivered to chat {chat_id} (msg_id: {msg_id})")
-    except Exception as e:
-        logger.error(f"Error delivering to chat {chat_id}: {e}")
-
-    # 2. Automatically copy to Database Channel TARGET_CHANNEL (@animedubsinhla)
-    if str(chat_id).lower() != TARGET_CHANNEL.lower() and msg_id:
-        try:
-            await sender.copy_message(
-                chat_id=TARGET_CHANNEL,
-                from_chat_id=chat_id,
-                message_id=msg_id,
-                caption=caption or f"<code>{filename}</code>",
-                parse_mode=enums.ParseMode.HTML
-            )
-            logger.info(f"Successfully copied to database channel {TARGET_CHANNEL}")
-        except Exception as e:
-            logger.error(f"Error copying to channel {TARGET_CHANNEL}: {e}")
-            if "CHAT_WRITE_FORBIDDEN" in str(e) or "CHANNEL_PRIVATE" in str(e):
-                with contextlib.suppress(Exception):
-                    await sender.send_message(
-                        chat_id,
-                        f"⚠️ <b>Database Warning:</b> Bot cannot post to <code>{TARGET_CHANNEL}</code>.\n"
-                        f"Please add the bot as an <b>Admin with 'Post Messages' permission</b> to the channel!",
-                        parse_mode=enums.ParseMode.HTML
-                    )
-
 # --- UI MENUS ---
 def get_panel_markup(task_id):
     def btn(text, data, style=enums.ButtonStyle.DEFAULT):
@@ -684,13 +524,73 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
         # Default upload (Upload Now)
         files_to_upload.append(filepath)
 
-    # 2. Upload generated files as Documents (Force File)
+    # 2. Upload generated files as Documents (Force File) using Native Fast Upload
     for f_path in files_to_upload:
         if cancel_flags.get(task_id): break
         f_name = os.path.basename(f_path)
-        input_file = await parallel_upload_file(f_path, f_name, task_id)
-        if cancel_flags.get(task_id): break
-        await send_uploaded_media(chat_id, input_file, f_name, CUSTOM_THUMB_PATH, f"<code>{f_name}</code>")
+        f_size = os.path.getsize(f_path)
+        
+        start_time = time.time()
+        if task_id in ACTIVE_TASKS:
+            ACTIVE_TASKS[task_id].update({
+                "status": "📤 Uploading Document",
+                "filename": f_name,
+                "current": 0,
+                "total": f_size,
+                "is_time": False,
+                "start_time": start_time,
+                "speed": 0,
+                "eta": 0
+            })
+            
+        async def upload_progress(current, total):
+            if cancel_flags.get(task_id):
+                raise asyncio.CancelledError("Upload cancelled")
+            now = time.time()
+            elapsed = max(now - start_time, 0.001)
+            speed = current / elapsed
+            eta = max(total - current, 0) / speed if speed > 0 else 0
+            if task_id in ACTIVE_TASKS:
+                ACTIVE_TASKS[task_id].update({
+                    "current": current,
+                    "total": total,
+                    "speed": speed,
+                    "eta": eta
+                })
+
+        try:
+            thumb = CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None
+            msg = await client.send_document(
+                chat_id=chat_id,
+                document=f_path,
+                thumb=thumb,
+                caption=f"<code>{f_name}</code>",
+                force_document=True,
+                progress=upload_progress
+            )
+            
+            # Automatically copy to Database Channel
+            if str(chat_id).lower() != TARGET_CHANNEL.lower() and msg:
+                try:
+                    await msg.copy(
+                        chat_id=TARGET_CHANNEL,
+                        caption=f"<code>{f_name}</code>",
+                        parse_mode=enums.ParseMode.HTML
+                    )
+                except Exception as e:
+                    logger.error(f"Error copying to channel {TARGET_CHANNEL}: {e}")
+                    if "CHAT_WRITE_FORBIDDEN" in str(e) or "CHANNEL_PRIVATE" in str(e):
+                        with contextlib.suppress(Exception):
+                            await client.send_message(
+                                chat_id,
+                                f"⚠️ <b>Database Warning:</b> Bot cannot post to <code>{TARGET_CHANNEL}</code>.\n"
+                                f"Please add the bot as an <b>Admin with 'Post Messages' permission</b> to the channel!",
+                                parse_mode=enums.ParseMode.HTML
+                            )
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Upload error: {e}")
 
 # --- EXECUTE TASK WORKER WITH SEMAPHORE ---
 async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, is_telegram_file=False, sub_path=None, audio_path=None):
