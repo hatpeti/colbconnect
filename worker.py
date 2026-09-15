@@ -2,6 +2,7 @@ import asyncio
 import os
 import websockets
 import json
+import random
 from wzgram import Client, filters, enums
 from wzgram.handlers import MessageHandler, CallbackQueryHandler
 from wzgram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -12,7 +13,6 @@ import re
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SECRET_TOKEN = os.environ.get("WS_SECRET", "supersecret")
 MASTER_WS_URL = os.environ.get("MASTER_WS_URL", "ws://localhost:8080")
 
 app = None
@@ -159,11 +159,22 @@ async def heartbeat_loop(websocket):
         
 async def main():
     global app, user_app
+    
+    # Generate pairing key
+    key = str(random.randint(100000, 999999))
+    print("="*60)
+    print(f"YOUR CONNECTION KEY IS: {key}")
+    print("Send `/colab` to your Telegram Master Bot and authorize this key.")
+    print("="*60)
+    
     logger.info(f"Connecting to Railway Master at {MASTER_WS_URL}...")
     try:
         async with websockets.connect(MASTER_WS_URL) as websocket:
-            # Authenticate
-            await websocket.send(SECRET_TOKEN)
+            # Send the key for authentication
+            await websocket.send(key)
+            logger.info("Key sent! Waiting for authorization from Master Bot...")
+            
+            # This will block until the owner clicks the Authorize button on Telegram
             response = await websocket.recv()
             
             try:
@@ -176,7 +187,7 @@ async def main():
                 logger.error("Authentication failed with Master Server!")
                 return
                 
-            logger.info("Connected to Master Server! Receiving credentials...")
+            logger.info("✅ Connected to Master Server! Receiving credentials...")
             
             api_id = data.get("API_ID")
             api_hash = data.get("API_HASH")
