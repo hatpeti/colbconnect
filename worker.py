@@ -1,7 +1,8 @@
 import asyncio
 import os
 import websockets
-from wzgram import Client, filters
+from wzgram import Client, filters, enums
+from wzgram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 import logging
 
@@ -23,10 +24,38 @@ if PREMIUM_SESSION:
     user_app = Client("premium_uploader", api_id=API_ID, api_hash=API_HASH, session_string=PREMIUM_SESSION)
 
 import time
+import re
 
-async def download_torrent(magnet_link: str, download_dir: str = "./downloads", status_callback=None):
+def format_progress(line_str, user_name="User"):
+    match = re.search(r' ([\d\.]+.*?)/([\d\.]+.*?)\(([\d\.]+)%\).*?DL:([\d\.]+.*?)(?: ETA:(.*?))?\]', line_str)
+    if not match:
+        return f"📥 **Downloading...**\n`{line_str}`"
+        
+    downloaded, total, percent_str, speed = match.group(1), match.group(2), match.group(3), match.group(4)
+    eta = match.group(5) if match.group(5) else "Unknown"
+    
+    try:
+        percent = float(percent_str)
+    except ValueError:
+        percent = 0.0
+        
+    filled = int(percent // 10)
+    bar = "■" * filled + "□" * (10 - filled)
+    
+    text = (
+        f"Task By 👤 {user_name}\n"
+        f"├ [{bar}] {percent}%\n"
+        f"├ Processed → {downloaded} of {total}\n"
+        f"├ Status → Downloading (Aria2c)\n"
+        f"├ Speed → {speed}/s\n"
+        f"└ Time → {eta}"
+    )
+    return text
+
+active_downloads = {}
+
+async def download_torrent(magnet_link: str, download_dir: str = "./downloads", status_callback=None, task_id=None):
     os.makedirs(download_dir, exist_ok=True)
-    # Using aria2c for fast downloading
     cmd = [
         "aria2c",
         "--seed-time=0",
@@ -40,19 +69,21 @@ async def download_torrent(magnet_link: str, download_dir: str = "./downloads", 
         stderr=asyncio.subprocess.PIPE
     )
     
-    # Read output line by line for live status
+    if task_id:
+        active_downloads[task_id] = process
+        
     while True:
         line = await process.stdout.readline()
         if not line:
             break
         line_str = line.decode('utf-8', errors='ignore').strip()
-        
-        # aria2c progress line looks like: [#xxxxxx 10MiB/100MiB(10%) CN:1 SD:1 DL:1MiB ETA:1m]
         if line_str.startswith("[#") and status_callback:
-            # We don't await the callback to avoid blocking the stdout reader
             asyncio.create_task(status_callback(line_str))
             
     await process.wait()
+    if task_id in active_downloads:
+        del active_downloads[task_id]
+        
     if process.returncode == 0:
         logger.info("Download completed!")
         files = os.listdir(download_dir)
@@ -70,29 +101,35 @@ async def handle_leech(client, message):
     status_msg = await message.reply("🚀 **Colab Worker is starting download...**\n`Connecting to peers...`")
     
     last_update_time = 0
+    user_name = message.from_user.first_name if message.from_user else "User"
+    task_id = str(message.id)
+    
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🛑 Cancel", callback_data=f"cancel_{task_id}", style=enums.ButtonStyle.DANGER),
+        InlineKeyboardButton("🌐 Status", callback_data="status", style=enums.ButtonStyle.PRIMARY)
+    ]])
     
     async def progress_update(progress_str):
         nonlocal last_update_time
         current_time = time.time()
-        # Update message at most every 4 seconds to avoid Telegram flood limits
         if current_time - last_update_time > 4:
+            formatted_text = format_progress(progress_str, user_name)
             try:
-                await status_msg.edit_text(f"🚀 **Downloading...**\n\n`{progress_str}`")
+                await status_msg.edit_text(f"`{formatted_text}`", reply_markup=markup)
                 last_update_time = current_time
             except Exception:
                 pass
     
-    downloaded_file = await download_torrent(magnet_link, status_callback=progress_update)
+    downloaded_file = await download_torrent(magnet_link, status_callback=progress_update, task_id=task_id)
     
     if not downloaded_file:
-        await status_msg.edit_text("❌ **Download Failed!** Please check the magnet link.")
+        await status_msg.edit_text("❌ **Download Failed or Cancelled!**")
         return
         
     await status_msg.edit_text("📤 **Download complete! Uploading to Telegram using WZGram fast uploader...**")
     
     try:
         uploader = user_app if user_app else client
-        # If using premium user_app, ensure it is connected
         if user_app and not user_app.is_connected:
             await user_app.start()
             
@@ -101,13 +138,25 @@ async def handle_leech(client, message):
             document=downloaded_file,
             caption="Here is your file, processed by Colab! ⚡️"
         )
-        await status_msg.edit_text("✅ **Successfully uploaded!**")
+        await status_msg.edit_text("✅ **Successfully uploaded!**", reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Done", callback_data="done", style=enums.ButtonStyle.SUCCESS)
+        ]]))
     except Exception as e:
         await status_msg.edit_text(f"❌ **Upload Failed!**\nError: {e}")
     finally:
-        # Cleanup
         if os.path.exists(downloaded_file):
             os.remove(downloaded_file)
+
+@app.on_callback_query(filters.regex(r"^cancel_(\d+)$"))
+async def cancel_download(client, callback_query):
+    task_id = callback_query.matches[0].group(1)
+    if task_id in active_downloads:
+        process = active_downloads[task_id]
+        process.terminate()
+        del active_downloads[task_id]
+        await callback_query.answer("Download cancelled!", show_alert=True)
+    else:
+        await callback_query.answer("Download not found or already finished.", show_alert=True)
 
 async def heartbeat_loop(websocket):
     try:
