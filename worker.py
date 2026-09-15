@@ -1,30 +1,22 @@
 import asyncio
 import os
 import websockets
+import json
 from wzgram import Client, filters, enums
+from wzgram.handlers import MessageHandler, CallbackQueryHandler
 from wzgram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from dotenv import load_dotenv
 import logging
+import time
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-API_ID = 38017568
-API_HASH = "edce8874495cfda158be92a333fa4823"
-BOT_TOKEN = "8527387193:AAH7t7dJhZQKlkcIkpUCv7F2cy78-QXjA6k"
-PREMIUM_SESSION = "WZ_AwUCRBogABS8Wb1qowLpUFBAAntHiLOaqiMZJMfHkgTu0vKE6oWPk-XUZ5W0urGzkhtY1HzKtT831JPLuLng7XXUvzdspOvtjVIkv2sgDNefXfsf57fsCOvwatiwdbvE2wKuwkQPDH2Rt8JeJD107wFWQrxpAOEEv--tRLgUHEkqR3Lm0nnVAUZwgYwUqY0lZ--o4Hl6piaDq3oEAhpyJob7ciYtgsvxh8r5qI6TNCdF1APmMySP_VHaae4OsKEGlWDs-BDLMZGBgunEQVojP2KWroO8JxtTNANrxJTg9_BDlN9XSm2KZiC7m-WGLLUxojJuxK505JOz_RqZ0D5BjCFN_QGtkCYAAAAAdj-wVAABuzkxLjEwOC41Ni4xODEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABu5C90"
 SECRET_TOKEN = os.environ.get("WS_SECRET", "supersecret")
 MASTER_WS_URL = os.environ.get("MASTER_WS_URL", "ws://localhost:8080")
 
-# Use Premium session if provided, otherwise fallback to bot token for uploads
-app = Client("colab_worker", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = None
 user_app = None
-
-if PREMIUM_SESSION:
-    user_app = Client("premium_uploader", api_id=API_ID, api_hash=API_HASH, session_string=PREMIUM_SESSION)
-
-import time
-import re
 
 def format_progress(line_str, user_name="User"):
     match = re.search(r' ([\d\.]+.*?)/([\d\.]+.*?)\(([\d\.]+)%\).*?DL:([\d\.]+.*?)(?: ETA:(.*?))?\]', line_str)
@@ -91,7 +83,6 @@ async def download_torrent(magnet_link: str, download_dir: str = "./downloads", 
             return os.path.join(download_dir, files[0])
     return None
 
-@app.on_message(filters.command("leech"))
 async def handle_leech(client, message):
     if len(message.command) < 2:
         await message.reply("Please provide a magnet link! Example: `/leech magnet:?...`")
@@ -147,7 +138,6 @@ async def handle_leech(client, message):
         if os.path.exists(downloaded_file):
             os.remove(downloaded_file)
 
-@app.on_callback_query(filters.regex(r"^cancel_(\d+)$"))
 async def cancel_download(client, callback_query):
     task_id = callback_query.matches[0].group(1)
     if task_id in active_downloads:
@@ -168,10 +158,7 @@ async def heartbeat_loop(websocket):
         logger.warning("Master server disconnected!")
         
 async def main():
-    if API_ID == 0 or not BOT_TOKEN:
-        logger.error("Please configure API_ID and BOT_TOKEN!")
-        return
-
+    global app, user_app
     logger.info(f"Connecting to Railway Master at {MASTER_WS_URL}...")
     try:
         async with websockets.connect(MASTER_WS_URL) as websocket:
@@ -179,17 +166,41 @@ async def main():
             await websocket.send(SECRET_TOKEN)
             response = await websocket.recv()
             
-            if response != "AUTHORIZED":
+            try:
+                data = json.loads(response)
+            except json.JSONDecodeError:
+                logger.error("Failed to parse JSON response from Master!")
+                return
+                
+            if data.get("status") != "AUTHORIZED":
                 logger.error("Authentication failed with Master Server!")
                 return
                 
-            logger.info("Connected to Master Server! Taking over Telegram Bot...")
+            logger.info("Connected to Master Server! Receiving credentials...")
+            
+            api_id = data.get("API_ID")
+            api_hash = data.get("API_HASH")
+            bot_token = data.get("BOT_TOKEN")
+            premium_session = data.get("PREMIUM_SESSION")
+            
+            if not api_id or not bot_token:
+                logger.error("Master did not provide valid credentials!")
+                return
+                
+            app = Client("colab_worker", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
+            
+            if premium_session:
+                user_app = Client("premium_uploader", api_id=api_id, api_hash=api_hash, session_string=premium_session)
+                
+            # Add handlers programmatically
+            app.add_handler(MessageHandler(handle_leech, filters.command("leech")))
+            app.add_handler(CallbackQueryHandler(cancel_download, filters.regex(r"^cancel_(\d+)$")))
             
             asyncio.create_task(heartbeat_loop(websocket))
             
             # Start the Telegram Bot on Colab
             await app.start()
-            logger.info("Bot is now running on Colab!")
+            logger.info("Bot is now running on Colab with received credentials!")
             
             # Keep running until websocket disconnects
             await websocket.wait_closed()
@@ -197,7 +208,7 @@ async def main():
     except Exception as e:
         logger.error(f"Failed to connect to Master: {e}")
     finally:
-        if app.is_connected:
+        if app and app.is_connected:
             await app.stop()
         if user_app and user_app.is_connected:
             await user_app.stop()
