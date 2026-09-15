@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 MASTER_WS_URL = "wss://leech-production-214b.up.railway.app"
 TARGET_CHANNEL = "@animedubsinhla"
-WATERMARK = "@animesinhala1"
+WATERMARK = "@animesinhla1"
 
 app = None
 user_app = None
