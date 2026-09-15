@@ -13,7 +13,7 @@ import re
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MASTER_WS_URL = os.environ.get("MASTER_WS_URL", "ws://localhost:8080")
+MASTER_WS_URL = "wss://leech-production-214b.up.railway.app"
 
 app = None
 user_app = None
