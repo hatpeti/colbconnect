@@ -851,6 +851,7 @@ async def handle_leech(client, message):
         global aria2_api
         meta_dl = aria2_api.add_torrent(t_file, options={"pause": "true"})
         files, t_name = meta_dl.files, meta_dl.name
+        aria2_api.remove([meta_dl], force=True, files=False)
         
         tree_html = build_file_tree(files, True)
         tree_txt = build_file_tree(files, False)
