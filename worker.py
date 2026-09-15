@@ -527,73 +527,52 @@ async def send_uploaded_media(chat_id, input_file, filename, thumb_path, caption
         force_file=True
     )
 
-    sent_channel_msg = None
-    # 1. Primary destination: TARGET_CHANNEL (@animedubsinhla)
+    msg_id = None
+    # 1. Send first to chat_id (source user or group)
     try:
-        peer_ch = await sender.resolve_peer(TARGET_CHANNEL)
-        parsed_ch = await sender.parser.parse(caption or f"<code>{filename}</code>", enums.ParseMode.HTML)
-        sent_channel_msg = await sender.invoke(
+        peer = await sender.resolve_peer(chat_id)
+        parsed = await sender.parser.parse(caption or f"<code>{filename}</code>", enums.ParseMode.HTML)
+        res = await sender.invoke(
             raw.functions.messages.SendMedia(
-                peer=peer_ch,
+                peer=peer,
                 media=media,
-                message=parsed_ch.get("message", ""),
-                entities=parsed_ch.get("entities", None),
+                message=parsed.get("message", ""),
+                entities=parsed.get("entities", None),
                 random_id=sender.rnd_id()
             )
         )
-        logger.info(f"Successfully uploaded to channel {TARGET_CHANNEL}")
+        for update in getattr(res, "updates", []):
+            m = getattr(update, "message", None)
+            if m and getattr(m, "id", None):
+                msg_id = m.id
+                break
+        if not msg_id and hasattr(res, "id"):
+            msg_id = res.id
+        logger.info(f"Successfully delivered to chat {chat_id} (msg_id: {msg_id})")
     except Exception as e:
-        logger.error(f"Error uploading to channel {TARGET_CHANNEL}: {e}")
+        logger.error(f"Error delivering to chat {chat_id}: {e}")
 
-    # 2. Also forward / notify to user's chat if different
-    if str(chat_id).lower() != TARGET_CHANNEL.lower():
+    # 2. Automatically copy to Database Channel TARGET_CHANNEL (@animedubsinhla)
+    if str(chat_id).lower() != TARGET_CHANNEL.lower() and msg_id:
         try:
-            if sent_channel_msg:
-                channel_doc = None
-                for update in getattr(sent_channel_msg, "updates", []):
-                    msg = getattr(update, "message", None)
-                    if msg and getattr(msg, "media", None):
-                        channel_doc = getattr(msg.media, "document", None)
-                        break
-                
-                peer_user = await sender.resolve_peer(chat_id)
-                if channel_doc:
-                    input_doc = raw.types.InputDocument(
-                        id=channel_doc.id,
-                        access_hash=channel_doc.access_hash,
-                        file_reference=channel_doc.file_reference
-                    )
-                    media_doc = raw.types.InputMediaDocument(id=input_doc)
-                    parsed_user = await sender.parser.parse(
-                        f"<b>✅ Uploaded to {TARGET_CHANNEL}</b>\n<code>{filename}</code>",
-                        enums.ParseMode.HTML
-                    )
-                    await sender.invoke(
-                        raw.functions.messages.SendMedia(
-                            peer=peer_user,
-                            media=media_doc,
-                            message=parsed_user.get("message", ""),
-                            entities=parsed_user.get("entities", None),
-                            random_id=sender.rnd_id()
-                        )
-                    )
-                else:
-                    await sender.send_message(chat_id, f"✅ <b>File uploaded to {TARGET_CHANNEL}!</b>\n<code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
-            else:
-                # Fallback: direct send to chat
-                peer = await sender.resolve_peer(chat_id)
-                parsed = await sender.parser.parse(caption or f"<code>{filename}</code>", enums.ParseMode.HTML)
-                await sender.invoke(
-                    raw.functions.messages.SendMedia(
-                        peer=peer,
-                        media=media,
-                        message=parsed.get("message", ""),
-                        entities=parsed.get("entities", None),
-                        random_id=sender.rnd_id()
-                    )
-                )
+            await sender.copy_message(
+                chat_id=TARGET_CHANNEL,
+                from_chat_id=chat_id,
+                message_id=msg_id,
+                caption=caption or f"<code>{filename}</code>",
+                parse_mode=enums.ParseMode.HTML
+            )
+            logger.info(f"Successfully copied to database channel {TARGET_CHANNEL}")
         except Exception as e:
-            logger.error(f"Error delivering to chat {chat_id}: {e}")
+            logger.error(f"Error copying to channel {TARGET_CHANNEL}: {e}")
+            if "CHAT_WRITE_FORBIDDEN" in str(e) or "CHANNEL_PRIVATE" in str(e):
+                with contextlib.suppress(Exception):
+                    await sender.send_message(
+                        chat_id,
+                        f"⚠️ <b>Database Warning:</b> Bot cannot post to <code>{TARGET_CHANNEL}</code>.\n"
+                        f"Please add the bot as an <b>Admin with 'Post Messages' permission</b> to the channel!",
+                        parse_mode=enums.ParseMode.HTML
+                    )
 
 # --- UI MENUS ---
 def get_panel_markup(task_id):
@@ -805,17 +784,51 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
 
 # --- TELEGRAM FILE HANDLER (PANEL TRIGGER FOR GROUPS & PRIVATE) ---
 async def handle_telegram_file(client, message):
-    if not (message.document or message.video): return
-    file_name = getattr(message.document or message.video, "file_name", "unknown_file.mp4")
-    task_id = str(message.id)
-    
-    await message.reply_text(
-        f"<b>🎬 File Detected:</b>\n<code>{safe_html(file_name)}</code>\n\n"
-        "👉 <i>Choose an action from the Encoding Panel below:</i>",
-        reply_markup=get_panel_markup(task_id),
-        parse_mode=enums.ParseMode.HTML,
-        quote=True
-    )
+    try:
+        media = message.document or message.video
+        if not media: return
+        file_name = getattr(media, "file_name", None)
+        if not file_name:
+            if message.video: file_name = f"video_{message.id}.mp4"
+            else: file_name = f"file_{message.id}"
+        task_id = str(message.id)
+        
+        await message.reply_text(
+            f"<b>🎬 File Detected:</b>\n<code>{safe_html(file_name)}</code>\n\n"
+            "👉 <i>Choose an action from the Encoding Panel below:</i>",
+            reply_markup=get_panel_markup(task_id),
+            parse_mode=enums.ParseMode.HTML,
+            quote=True
+        )
+    except Exception as e:
+        logger.error(f"Error in handle_telegram_file: {e}")
+
+# --- PANEL & ENCODE COMMAND HANDLER (GREAT FOR GROUPS) ---
+async def panel_cmd(client, message):
+    try:
+        media_msg = message.reply_to_message
+        if not media_msg or not (media_msg.document or media_msg.video):
+            if message.document or message.video:
+                media_msg = message
+            else:
+                return await message.reply("👉 <i>Please reply to a video or file with <code>/panel</code> to open the Encoding Panel.</i>", parse_mode=enums.ParseMode.HTML)
+        
+        media = media_msg.document or media_msg.video
+        file_name = getattr(media, "file_name", None)
+        if not file_name:
+            if media_msg.video: file_name = f"video_{media_msg.id}.mp4"
+            else: file_name = f"file_{media_msg.id}"
+            
+        task_id = str(media_msg.id)
+        await message.reply_text(
+            f"<b>🎬 File Detected:</b>\n<code>{safe_html(file_name)}</code>\n\n"
+            "👉 <i>Choose an action from the Encoding Panel below:</i>",
+            reply_markup=get_panel_markup(task_id),
+            parse_mode=enums.ParseMode.HTML,
+            quote=True
+        )
+    except Exception as e:
+        logger.error(f"Error in panel_cmd: {e}")
 
 # --- LEECH COMMAND ---
 async def handle_leech(client, message):
@@ -945,7 +958,13 @@ async def cb_handler(client, cb):
 
         await cb.message.edit_reply_markup(None)
         is_tg = (task_id not in current_tasks)
-        asyncio.create_task(execute_task_worker(client, cb.message.chat.id, task_id, action, media_msg=cb.message.reply_to_message, is_telegram_file=is_tg))
+        media_target = cb.message.reply_to_message
+        if not media_target and is_tg:
+            try:
+                media_target = await client.get_messages(cb.message.chat.id, int(task_id))
+            except:
+                pass
+        asyncio.create_task(execute_task_worker(client, cb.message.chat.id, task_id, action, media_msg=media_target, is_telegram_file=is_tg))
 
 # --- CANCEL COMMAND ---
 async def cancel_cmd(client, message):
@@ -1006,6 +1025,7 @@ async def main():
             # Register Handlers for Private AND Group chats
             app.add_handler(MessageHandler(start_cmd, filters.command("start")))
             app.add_handler(MessageHandler(help_cmd, filters.command("help")))
+            app.add_handler(MessageHandler(panel_cmd, filters.command(["panel", "encode"])))
             app.add_handler(MessageHandler(handle_leech, filters.command("leech")))
             app.add_handler(MessageHandler(cancel_cmd, filters.regex(r"^/cancel")))
             app.add_handler(MessageHandler(handle_telegram_file, (filters.document | filters.video)))
