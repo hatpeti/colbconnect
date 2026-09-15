@@ -83,6 +83,9 @@ async def download_torrent(magnet_link: str, download_dir: str = "./downloads", 
             return os.path.join(download_dir, files[0])
     return None
 
+async def start_cmd(client, message):
+    await message.reply("⚡ **Colab Worker is Online & Ready!**\nUse `/leech <magnet_link>` to start downloading.")
+
 async def handle_leech(client, message):
     if len(message.command) < 2:
         await message.reply("Please provide a magnet link! Example: `/leech magnet:?...`")
@@ -204,6 +207,7 @@ async def main():
                 user_app = Client("premium_uploader", api_id=api_id, api_hash=api_hash, session_string=premium_session)
                 
             # Add handlers programmatically
+            app.add_handler(MessageHandler(start_cmd, filters.command("start")))
             app.add_handler(MessageHandler(handle_leech, filters.command("leech")))
             app.add_handler(CallbackQueryHandler(cancel_download, filters.regex(r"^cancel_(\d+)$")))
             
