@@ -112,9 +112,11 @@ async def download_torrent(magnet_link: str, download_dir: str = "./downloads", 
     return None
 
 async def start_cmd(client, message):
+    print("DEBUG: Received /start command!")
     await message.reply("⚡ **Colab Worker is Online & Ready!**\nUse `/leech <magnet_link>` to start downloading.")
 
 async def handle_leech(client, message):
+    print(f"DEBUG: Received /leech command: {message.text}")
     if len(message.command) < 2:
         await message.reply("Please provide a magnet link! Example: `/leech magnet:?...`")
         return
@@ -244,10 +246,10 @@ async def main():
                 logger.error("Master did not provide valid credentials!")
                 return
                 
-            app = Client("colab_worker", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
+            app = Client("colab_worker", api_id=api_id, api_hash=api_hash, bot_token=bot_token, in_memory=True)
             
             if premium_session:
-                user_app = Client("premium_uploader", api_id=api_id, api_hash=api_hash, session_string=premium_session)
+                user_app = Client("premium_uploader", api_id=api_id, api_hash=api_hash, session_string=premium_session, in_memory=True)
                 
             # Add handlers programmatically
             app.add_handler(MessageHandler(start_cmd, filters.command("start")))
