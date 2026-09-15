@@ -9,10 +9,10 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-PREMIUM_SESSION = os.environ.get("PREMIUM_SESSION", "") # Optional for 4GB uploads
+API_ID = 38017568
+API_HASH = "edce8874495cfda158be92a333fa4823"
+BOT_TOKEN = "8527387193:AAH7t7dJhZQKlkcIkpUCv7F2cy78-QXjA6k"
+PREMIUM_SESSION = "WZ_AwUCRBogABS8Wb1qowLpUFBAAntHiLOaqiMZJMfHkgTu0vKE6oWPk-XUZ5W0urGzkhtY1HzKtT831JPLuLng7XXUvzdspOvtjVIkv2sgDNefXfsf57fsCOvwatiwdbvE2wKuwkQPDH2Rt8JeJD107wFWQrxpAOEEv--tRLgUHEkqR3Lm0nnVAUZwgYwUqY0lZ--o4Hl6piaDq3oEAhpyJob7ciYtgsvxh8r5qI6TNCdF1APmMySP_VHaae4OsKEGlWDs-BDLMZGBgunEQVojP2KWroO8JxtTNANrxJTg9_BDlN9XSm2KZiC7m-WGLLUxojJuxK505JOz_RqZ0D5BjCFN_QGtkCYAAAAAdj-wVAABuzkxLjEwOC41Ni4xODEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABu5C90"
 SECRET_TOKEN = os.environ.get("WS_SECRET", "supersecret")
 MASTER_WS_URL = os.environ.get("MASTER_WS_URL", "ws://localhost:8080")
 
