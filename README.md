@@ -6,7 +6,7 @@ To run this worker on Google Colab, you need to install the dependencies in a no
 2. Run this cell to install the required tools:
 
 ```bash
-!apt-get install -y aria2
+!wget -qO- https://github.com/P3TERX/Aria2-Pro-Core/releases/download/1.37.0_2023.08.17/aria2-1.37.0-static-linux-amd64.tar.gz | tar -xz && mv aria2c /usr/local/bin/
 !pip install -U wzgram[fast] websockets python-dotenv
 ```
 
