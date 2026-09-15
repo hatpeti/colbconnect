@@ -576,18 +576,18 @@ async def send_uploaded_media(chat_id, input_file, filename, thumb_path, caption
 
 # --- UI MENUS ---
 def get_panel_markup(task_id):
-    def btn(text, data, style=enums.ButtonStyle.DEFAULT):
-        return InlineKeyboardButton(text, callback_data=data, style=style)
+    def btn(text, data):
+        return InlineKeyboardButton(text, callback_data=data)
 
     return InlineKeyboardMarkup([
-        [btn("480p", f"panel_480_{task_id}", style=enums.ButtonStyle.PRIMARY),
-         btn("720p", f"panel_720_{task_id}", style=enums.ButtonStyle.PRIMARY),
-         btn("1080p", f"panel_1080_{task_id}", style=enums.ButtonStyle.PRIMARY)],
-        [btn("✂️ Remove Sub", f"panel_removesub_{task_id}", style=enums.ButtonStyle.DEFAULT),
-         btn("📝 Add Sub", f"panel_addsub_{task_id}", style=enums.ButtonStyle.DEFAULT)],
-        [btn("🔄 Re-encode All", f"panel_reencode_{task_id}", style=enums.ButtonStyle.PRIMARY)],
-        [btn("🚀 Upload Now", f"panel_upload_{task_id}", style=enums.ButtonStyle.SUCCESS)],
-        [btn("❌ Cancel", f"panel_cancel_{task_id}", style=enums.ButtonStyle.DANGER)]
+        [btn("480p", f"panel_480_{task_id}"),
+         btn("720p", f"panel_720_{task_id}"),
+         btn("1080p", f"panel_1080_{task_id}")],
+        [btn("✂️ Remove Sub", f"panel_removesub_{task_id}"),
+         btn("📝 Add Sub", f"panel_addsub_{task_id}")],
+        [btn("🔄 Re-encode All", f"panel_reencode_{task_id}")],
+        [btn("🚀 Upload Now", f"panel_upload_{task_id}")],
+        [btn("❌ Cancel", f"panel_cancel_{task_id}")]
     ])
 
 # Sinhala Help Menu
