@@ -44,6 +44,34 @@ def format_progress(line_str, user_name="User"):
     )
     return text
 
+def format_upload_progress(current, total, start_time, user_name="User"):
+    percent = round(current * 100 / total, 1) if total else 0
+    filled = int(percent // 10)
+    bar = "■" * filled + "□" * (10 - filled)
+    
+    elapsed = time.time() - start_time
+    speed = current / elapsed if elapsed > 0 else 0
+    speed_str = f"{speed / 1024 / 1024:.2f} MB/s"
+    
+    if speed > 0:
+        eta_seconds = (total - current) / speed
+        eta = f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s"
+    else:
+        eta = "Unknown"
+        
+    downloaded_str = f"{current / 1024 / 1024:.2f} MB"
+    total_str = f"{total / 1024 / 1024:.2f} MB"
+    
+    text = (
+        f"Task By 👤 {user_name}\n"
+        f"├ [{bar}] {percent}%\n"
+        f"├ Processed → {downloaded_str} of {total_str}\n"
+        f"├ Status → Uploading to Telegram\n"
+        f"├ Speed → {speed_str}\n"
+        f"└ Time → {eta}"
+    )
+    return text
+
 active_downloads = {}
 
 async def download_torrent(magnet_link: str, download_dir: str = "./downloads", status_callback=None, task_id=None):
@@ -120,19 +148,34 @@ async def handle_leech(client, message):
         await status_msg.edit_text("❌ **Download Failed or Cancelled!**")
         return
         
-    await status_msg.edit_text("📤 **Download complete! Uploading to Telegram using WZGram fast uploader...**")
+    await status_msg.edit_text("📤 **Download complete! Uploading to @animedubsinhla channel...**")
     
+    upload_start_time = time.time()
+    last_upload_update = 0
+    
+    async def upload_progress(current, total):
+        nonlocal last_upload_update
+        current_time = time.time()
+        if current_time - last_upload_update > 4:
+            formatted_text = format_upload_progress(current, total, upload_start_time, user_name)
+            try:
+                await status_msg.edit_text(f"`{formatted_text}`", reply_markup=markup)
+                last_upload_update = current_time
+            except Exception:
+                pass
+
     try:
         uploader = user_app if user_app else client
         if user_app and not user_app.is_connected:
             await user_app.start()
             
         await uploader.send_document(
-            chat_id=message.chat.id,
+            chat_id="@animedubsinhla",
             document=downloaded_file,
-            caption="Here is your file, processed by Colab! ⚡️"
+            caption="Here is your file, processed by Colab! ⚡️",
+            progress=upload_progress
         )
-        await status_msg.edit_text("✅ **Successfully uploaded!**", reply_markup=InlineKeyboardMarkup([[
+        await status_msg.edit_text("✅ **Successfully uploaded to @animedubsinhla!**", reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Done", callback_data="done", style=enums.ButtonStyle.SUCCESS)
         ]]))
     except Exception as e:
