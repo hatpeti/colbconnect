@@ -767,6 +767,9 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                             "speed": dl.download_speed,
                             "eta": dl.eta.total_seconds() if dl.eta else 0
                         })
+                        if dl.completed_length >= dl.total_length:
+                            aria2_api.remove([dl], force=True, files=False)
+                            break
                         
                 if not cancel_flags.get(task_id):
                     for f in dl.files:
