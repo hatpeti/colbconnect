@@ -907,8 +907,8 @@ async def reply_handler(client, message):
 async def cb_handler(client, cb):
     data = cb.data
     if data.startswith("panel_"):
-        parts = data.split("_", 2)
-        action, task_id = parts[1], parts[2]
+        action = data[len("panel_"):].rsplit("_", 1)[0]
+        task_id = data.rsplit("_", 1)[1]
         
         if action == "cancel":
             cancel_flags[task_id] = True
