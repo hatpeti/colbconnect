@@ -30,15 +30,21 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MASTER_WS_URL = "wss://leech-production-214b.up.railway.app"
+TARGET_CHANNEL = "@animedubsinhla"
+WATERMARK = "@animesinhala1"
+
 app = None
 user_app = None
 upload_client = None
+aria2_api = None
 
-# Settings
+# Settings & Concurrency
+CONCURRENCY_LIMIT = 4
+TASK_SEMAPHORE = asyncio.Semaphore(CONCURRENCY_LIMIT)
 PART_SIZE = 512 * 1024
 UPLOAD_WORKERS = 8
 PART_RETRIES = 8
-UI_INTERVAL = 1.5
+UI_INTERVAL = 3.0
 MAX_FILE_SIZE = 2000 * 1024 * 1024
 BIG_FILE_THRESHOLD = 10 * 1024 * 1024
 SESSION_DIR = "/content/telegram_sessions"
@@ -47,12 +53,73 @@ THUMB_DIR = "/content/bot_thumbnail"
 os.makedirs(THUMB_DIR, exist_ok=True)
 CUSTOM_THUMB_PATH = os.path.join(THUMB_DIR, "custom_thumb.jpg")
 
-current_tasks = {}
+# Global State Tracker
+ACTIVE_TASKS = {}
+STATUS_MESSAGES = {}
 cancel_flags = {}
 upload_runtime = {}
-batch_states = {}
+current_tasks = {}
+pending_sub_replies = {}
+pending_audio_replies = {}
 
-# --- HELPERS ---
+_prev_cpu_times = [0.0, 0.0]
+
+# --- SYSTEM STATS & FORMATTING HELPERS ---
+def get_system_stats():
+    global _prev_cpu_times
+    cpu_pct = 0.0
+    try:
+        with open("/proc/stat", "r") as f:
+            fields = [float(x) for x in f.readline().split()[1:8]]
+        idle = fields[3] + fields[4]
+        total = sum(fields)
+        idle_delta = idle - _prev_cpu_times[0]
+        total_delta = total - _prev_cpu_times[1]
+        _prev_cpu_times = [idle, total]
+        if total_delta > 0:
+            cpu_pct = round(100.0 * (1.0 - idle_delta / total_delta), 1)
+    except:
+        cpu_pct = 0.0
+
+    ram_pct = 0.0
+    try:
+        mem = {}
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    mem[parts[0].strip()] = float(parts[1].split()[0])
+        total_mem = mem.get("MemTotal", 1.0)
+        avail_mem = mem.get("MemAvailable", mem.get("MemFree", 0.0))
+        used_mem = total_mem - avail_mem
+        ram_pct = round((used_mem / total_mem) * 100, 1)
+    except:
+        ram_pct = 0.0
+
+    disk_free_str, disk_pct = "0 GB", 0.0
+    try:
+        path = "/content" if os.path.exists("/content") else "."
+        total_b, used_b, free_b = shutil.disk_usage(path)
+        disk_pct = round((used_b / total_b) * 100, 1)
+        disk_free_str = format_bytes(free_b)
+    except:
+        pass
+
+    uptime_str = "0m"
+    try:
+        with open("/proc/uptime", "r") as f:
+            up_secs = float(f.read().split()[0])
+        d = int(up_secs // 86400)
+        h = int((up_secs % 86400) // 3600)
+        m = int((up_secs % 3600) // 60)
+        if d > 0: uptime_str = f"{d}d {h}h {m}m"
+        elif h > 0: uptime_str = f"{h}h {m}m"
+        else: uptime_str = f"{m}m"
+    except:
+        uptime_str = "N/A"
+
+    return cpu_pct, disk_free_str, disk_pct, ram_pct, uptime_str
+
 def check_gpu():
     try: return subprocess.run(["nvidia-smi"], capture_output=True, text=True).returncode == 0
     except: return False
@@ -80,7 +147,15 @@ def format_time(seconds):
     if m > 0: return f"{m}m {s}s"
     return f"{s}s"
 
+def make_progress_bar(percentage):
+    pct = max(0.0, min(100.0, percentage))
+    filled = int(round(pct / 10))
+    bar = "■" * filled + "□" * (10 - filled)
+    return bar, pct
+
 def safe_html(text): return html.escape(str(text), quote=False)
+
+def get_mime_type(path): return mimetypes.guess_type(path)[0] or "application/octet-stream"
 
 def parse_selection(selection_str, max_idx):
     if selection_str.lower() == "all": return list(range(1, max_idx + 1))
@@ -101,8 +176,6 @@ def parse_selection(selection_str, max_idx):
             if 1 <= idx <= max_idx and idx not in indices:
                 indices.append(idx)
     return indices
-
-def get_mime_type(path): return mimetypes.guess_type(path)[0] or "application/octet-stream"
 
 def build_file_tree(files, is_html=True):
     tree = {}
@@ -132,6 +205,94 @@ def build_file_tree(files, is_html=True):
                 lines.append(f"{prefix}{connector}📄 {idx_str} {html.escape(key) if is_html else key} ({val['size'] / (1024*1024):.2f} MB)")
         return lines
     return "\n".join(render_tree(tree))
+
+# --- GLOBAL PROGRESS UI LOOP ---
+async def ensure_status_message(chat_id):
+    if chat_id in STATUS_MESSAGES:
+        return STATUS_MESSAGES[chat_id]
+    try:
+        msg = await app.send_message(chat_id, "⏳ <b>Starting task...</b>", parse_mode=enums.ParseMode.HTML)
+        STATUS_MESSAGES[chat_id] = msg
+        return msg
+    except Exception as e:
+        logger.error(f"Error creating status message: {e}")
+        return None
+
+async def global_ui_loop():
+    while True:
+        await asyncio.sleep(UI_INTERVAL)
+        if not app or not app.is_connected:
+            continue
+
+        active_chats = set(task["chat_id"] for task in ACTIVE_TASKS.values())
+        
+        # Check registered status messages
+        for chat_id in list(STATUS_MESSAGES.keys()):
+            status_msg = STATUS_MESSAGES.get(chat_id)
+            if not status_msg: continue
+            
+            chat_tasks = [t for t in ACTIVE_TASKS.values() if t["chat_id"] == chat_id]
+            if not chat_tasks:
+                try:
+                    await status_msg.edit_text("✅ <b>All tasks completed!</b>", parse_mode=enums.ParseMode.HTML)
+                except: pass
+                STATUS_MESSAGES.pop(chat_id, None)
+                continue
+
+            # Render Global Progress Message
+            cpu_pct, disk_free, disk_pct, ram_pct, uptime = get_system_stats()
+            task_blocks = []
+
+            for idx, t in enumerate(chat_tasks, 1):
+                total = max(t.get("total", 1), 1)
+                current = max(0, t.get("current", 0))
+                pct = (current / total) * 100
+                bar, pct_clamped = make_progress_bar(pct)
+
+                if t.get("is_time", False):
+                    processed_str = f"{format_time(current)} of {format_time(total)}"
+                    speed_str = f"{t.get('speed', 0.0):.2f}x"
+                else:
+                    processed_str = f"{format_bytes(current)} of {format_bytes(total)}"
+                    speed_str = f"{format_bytes(t.get('speed', 0.0))}/s"
+
+                eta_str = format_time(t.get("eta", 0))
+                user_disp = t.get("user_mention", "User")
+                task_id = t.get("task_id", "")
+                fname = t.get("filename", "Unknown")
+
+                block = (
+                    f"Task #{idx} By 👤 {user_disp}\n"
+                    f"├ 🎬 <b>{safe_html(fname)}</b>\n"
+                    f"├ [{bar}] {pct_clamped:.2f}%\n"
+                    f"├ Processed → {processed_str}\n"
+                    f"├ Status → {t.get('status', 'Processing')}\n"
+                    f"├ Speed → {speed_str}\n"
+                    f"├ Time → {eta_str}\n"
+                    f"└ Stop → /cancel_{task_id}"
+                )
+                task_blocks.append(block)
+
+            stats_block = (
+                f"Bot Stats 🤖\n"
+                f"├ CPU → {cpu_pct}% | Disk → {disk_free} [{disk_pct}%]\n"
+                f"└ RAM → ram_pct: {ram_pct}% | UP → {uptime}"
+            )
+            # Fix stats line display
+            stats_block = (
+                f"<b>Bot Stats</b> 🤖\n"
+                f"├ CPU → {cpu_pct}% | Disk → {disk_free} [{disk_pct}%]\n"
+                f"└ RAM → {ram_pct}% | UP → {uptime}"
+            )
+
+            full_text = "\n\n".join(task_blocks) + "\n\n" + stats_block
+
+            try:
+                await status_msg.edit_text(full_text, parse_mode=enums.ParseMode.HTML)
+            except FloodWait as fw:
+                await asyncio.sleep(min(int(getattr(fw, "value", 2)), 30))
+            except Exception as e:
+                pass
 
 # --- MEDIA PROCESSING & WATERMARKING ---
 async def probe_media_streams(filepath):
@@ -163,7 +324,7 @@ async def get_thumbnail(filepath):
     except: pass
     return None
 
-async def apply_mkv_watermark(filepath, watermark="@animesinhala1"):
+async def apply_mkv_watermark(filepath, watermark=WATERMARK):
     if not filepath.lower().endswith(".mkv"): return filepath
     try:
         probe = await probe_media_streams(filepath)
@@ -195,33 +356,20 @@ def generate_res_name(original_name, target_res):
     if enc_base_name == name_without_ext: enc_base_name += f"_{target_res}p"
     return enc_base_name
 
-# --- ENCODING & FFMPEG OPERATIONS ---
-async def update_ui(message, action, filename, current, total, start_time, last_edit_time, task_id=None, force=False, extra_lines=None, is_encoding=False):
-    now = time.time()
-    if not force and (now - last_edit_time[0] < UI_INTERVAL) and current < total: return last_edit_time[0]
-    last_edit_time[0] = now
-    percentage = (current / total) * 100 if total > 0 else 0
-    filled = min(18, int(18 * percentage / 100))
-    bar = "█" * filled + "░" * (18 - filled)
-    elapsed = max(now - start_time, 0.001)
-    speed = current / elapsed
-    eta = max(total - current, 0) / speed if speed > 0 else 0
-
-    msg = f"<b>🎬 {safe_html(filename)}</b>\n\n<b>ක්‍රියාවලිය:</b> {safe_html(action)}\n<code>[{bar}] {percentage:.1f}%</code>\n"
-    if is_encoding:
-        msg += f"<i>{format_time(current)} / {format_time(total)}</i>\n<b>Speed:</b> {speed:.2f}x\n<b>ETA:</b> {format_time(eta)}\n"
-    else:
-        msg += f"<i>{format_bytes(current)} / {format_bytes(total)}</i>\n<b>වේගය:</b> {format_bytes(speed)}/s ({format_mbps(speed)})\n<b>ETA:</b> {format_time(eta)}\n"
-
-    if extra_lines: msg += "\n" + "\n".join(extra_lines) + "\n"
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Task", callback_data=f"stop_{task_id}")]]) if task_id else None
-    try: await message.edit_text(msg, parse_mode=enums.ParseMode.HTML, reply_markup=markup)
-    except: pass
-    return last_edit_time[0]
-
-async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, ui_msg, task_id, action_name, filename):
+# --- FFMPEG & ENCODING OPERATIONS ---
+async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action_name, filename):
     process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    start_time, last_edit_time = time.time(), [0]
+    start_time = time.time()
+    
+    if task_id in ACTIVE_TASKS:
+        ACTIVE_TASKS[task_id].update({
+            "status": action_name,
+            "filename": filename,
+            "total": total_duration,
+            "is_time": True,
+            "start_time": start_time
+        })
+
     while True:
         if cancel_flags.get(task_id):
             process.terminate()
@@ -232,7 +380,17 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, ui_
         if line.startswith("out_time_us="):
             try:
                 time_us = int(line.split("=")[1])
-                await update_ui(ui_msg, action_name, filename, max(0, time_us / 1_000_000), max(total_duration, 1), start_time, last_edit_time, task_id, is_encoding=True)
+                curr_sec = max(0, time_us / 1_000_000)
+                now = time.time()
+                elapsed = max(now - start_time, 0.001)
+                speed = curr_sec / elapsed
+                eta = max(total_duration - curr_sec, 0) / speed if speed > 0 else 0
+                if task_id in ACTIVE_TASKS:
+                    ACTIVE_TASKS[task_id].update({
+                        "current": curr_sec,
+                        "speed": speed,
+                        "eta": eta
+                    })
             except: pass
     await process.wait()
     if process.returncode != 0:
@@ -240,7 +398,7 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, ui_
         raise Exception(f"FFMPEG Failed:\n{err.decode('utf-8', errors='ignore')[-1000:]}")
     return os.path.exists(output_path)
 
-async def encode_video(input_path, output_path, resolution, total_duration, ui_msg, task_id, filename):
+async def encode_video(input_path, output_path, resolution, total_duration, task_id, filename):
     has_nvenc = check_gpu()
     if resolution == 1080: scale, cq, crf = "scale=-2:'min(1080,ih)'", "30", "28"
     elif resolution == 720: scale, cq, crf = "scale=-2:'min(720,ih)'", "34", "32"
@@ -248,15 +406,15 @@ async def encode_video(input_path, output_path, resolution, total_duration, ui_m
 
     if has_nvenc:
         vcodec = ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-cq", cq, "-pix_fmt", "yuv420p"]
-        action = f"⚙️ Re-Encoding {resolution}p (GPU)"
+        action = f"⚙️ Encoding {resolution}p (GPU)"
     else:
         vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
-        action = f"⚙️ Re-Encoding {resolution}p (CPU)"
+        action = f"⚙️ Encoding {resolution}p (CPU)"
 
     cmd = ["ffmpeg", "-y", "-hwaccel", "auto", "-i", input_path, "-vf", scale, *vcodec, "-c:a", "copy", "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-c:s", "copy", "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path]
-    return await run_ffmpeg_operation(cmd, input_path, output_path, total_duration, ui_msg, task_id, action, filename)
+    return await run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action, filename)
 
-# --- UPLOAD ---
+# --- UPLOAD OPERATIONS (DOCUMENT / FORCE FILE) ---
 async def upload_part(client, fd, file_id, part_no, total_parts, file_size, is_big, cancel_event):
     offset = part_no * PART_SIZE
     size_to_read = min(PART_SIZE, file_size - offset)
@@ -279,7 +437,7 @@ async def upload_part(client, fd, file_id, part_no, total_parts, file_size, is_b
             await asyncio.sleep(min(2.0, 0.15 * (2 ** (attempt - 1))))
     raise RuntimeError(f"Part {part_no} failed: {last_error}")
 
-async def parallel_upload_file(path, filename, task_id, ui_msg):
+async def parallel_upload_file(path, filename, task_id):
     global upload_client
     file_size = os.path.getsize(path)
     is_big = file_size > BIG_FILE_THRESHOLD
@@ -293,21 +451,36 @@ async def parallel_upload_file(path, filename, task_id, ui_msg):
     queue = asyncio.Queue()
     for p in range(total_parts): queue.put_nowait(p)
 
-    state = {"uploaded": 0, "lock": asyncio.Lock(), "last_bytes": 0, "last_time": time.time(), "instant": 0.0}
-    start_time, last_edit_time = time.time(), [0]
+    state = {"uploaded": 0, "lock": asyncio.Lock(), "last_bytes": 0, "last_time": time.time()}
+    start_time = time.time()
+
+    if task_id in ACTIVE_TASKS:
+        ACTIVE_TASKS[task_id].update({
+            "status": "📤 Uploading Document",
+            "filename": filename,
+            "current": 0,
+            "total": file_size,
+            "is_time": False,
+            "start_time": start_time,
+            "speed": 0,
+            "eta": 0
+        })
 
     async def progress_pump():
         while not cancel_event.is_set():
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
             current = state["uploaded"]
             now = time.time()
-            dt = max(now - state["last_time"], 0.001)
-            state["instant"] = max(0.0, (current - state["last_bytes"]) / dt)
-            state["last_bytes"] = current
-            state["last_time"] = now
+            elapsed = max(now - start_time, 0.001)
+            speed = current / elapsed
+            eta = max(file_size - current, 0) / speed if speed > 0 else 0
+            if task_id in ACTIVE_TASKS:
+                ACTIVE_TASKS[task_id].update({
+                    "current": current,
+                    "speed": speed,
+                    "eta": eta
+                })
             if current >= file_size: break
-            avg = current / max(now - start_time, 0.001)
-            await update_ui(ui_msg, "📤 Telegram Upload", filename, current, file_size, start_time, last_edit_time, task_id, extra_lines=[f"<b>⚡ Instant:</b> {format_bytes(state['instant'])}/s", f"<b>AVG:</b> {format_bytes(avg)}/s"])
 
     runtime["progress_task"] = asyncio.create_task(progress_pump())
     fd = os.open(path, os.O_RDONLY)
@@ -331,8 +504,6 @@ async def parallel_upload_file(path, filename, task_id, ui_msg):
         if cancel_event.is_set(): raise asyncio.CancelledError
         if is_big: input_file = raw.types.InputFileBig(id=file_id, parts=total_parts, name=filename)
         else: input_file = raw.types.InputFile(id=file_id, parts=total_parts, name=filename, md5_checksum="")
-        avg = file_size / max(time.time() - start_time, 0.001)
-        await update_ui(ui_msg, f"✅ Upload complete | AVG {format_bytes(avg)}/s", filename, file_size, file_size, start_time, last_edit_time, task_id, force=True)
         return input_file
     finally:
         cancel_event.set()
@@ -340,36 +511,107 @@ async def parallel_upload_file(path, filename, task_id, ui_msg):
         if runtime.get("progress_task"): runtime["progress_task"].cancel()
         upload_runtime.pop(task_id, None)
 
-async def send_uploaded_media(chat_id, input_file, filename, is_video, duration, width, height, thumb_path, caption):
+async def send_uploaded_media(chat_id, input_file, filename, thumb_path, caption):
     sender = upload_client
     thumb = None
     if thumb_path and os.path.exists(thumb_path):
-        with contextlib.suppress(Exception): thumb = await sender.save_file(thumb_path)
+        with contextlib.suppress(Exception):
+            thumb = await sender.save_file(thumb_path)
 
-    if is_video:
-        mime = "video/mp4" if filename.lower().endswith(".mp4") else "video/x-matroska"
-        attr = [raw.types.DocumentAttributeVideo(duration=int(duration or 1), w=int(width or 1280), h=int(height or 720), supports_streaming=True), raw.types.DocumentAttributeFilename(file_name=filename)]
-        media = raw.types.InputMediaUploadedDocument(file=input_file, thumb=thumb, mime_type=mime, attributes=attr, force_file=None)
-    else:
-        media = raw.types.InputMediaUploadedDocument(file=input_file, thumb=thumb, mime_type=get_mime_type(filename), attributes=[raw.types.DocumentAttributeFilename(file_name=filename)], force_file=True)
+    # Force document / file upload (no streaming flag)
+    media = raw.types.InputMediaUploadedDocument(
+        file=input_file,
+        thumb=thumb,
+        mime_type=get_mime_type(filename),
+        attributes=[raw.types.DocumentAttributeFilename(file_name=filename)],
+        force_file=True
+    )
 
-    peer = await sender.resolve_peer(chat_id)
-    parsed = await sender.parser.parse(caption or "", enums.ParseMode.HTML)
-    return await sender.invoke(raw.functions.messages.SendMedia(peer=peer, media=media, message=parsed.get("message", ""), entities=parsed.get("entities", None), random_id=sender.rnd_id()))
+    sent_channel_msg = None
+    # 1. Primary destination: TARGET_CHANNEL (@animedubsinhla)
+    try:
+        peer_ch = await sender.resolve_peer(TARGET_CHANNEL)
+        parsed_ch = await sender.parser.parse(caption or f"<code>{filename}</code>", enums.ParseMode.HTML)
+        sent_channel_msg = await sender.invoke(
+            raw.functions.messages.SendMedia(
+                peer=peer_ch,
+                media=media,
+                message=parsed_ch.get("message", ""),
+                entities=parsed_ch.get("entities", None),
+                random_id=sender.rnd_id()
+            )
+        )
+        logger.info(f"Successfully uploaded to channel {TARGET_CHANNEL}")
+    except Exception as e:
+        logger.error(f"Error uploading to channel {TARGET_CHANNEL}: {e}")
+
+    # 2. Also forward / notify to user's chat if different
+    if str(chat_id).lower() != TARGET_CHANNEL.lower():
+        try:
+            if sent_channel_msg:
+                channel_doc = None
+                for update in getattr(sent_channel_msg, "updates", []):
+                    msg = getattr(update, "message", None)
+                    if msg and getattr(msg, "media", None):
+                        channel_doc = getattr(msg.media, "document", None)
+                        break
+                
+                peer_user = await sender.resolve_peer(chat_id)
+                if channel_doc:
+                    input_doc = raw.types.InputDocument(
+                        id=channel_doc.id,
+                        access_hash=channel_doc.access_hash,
+                        file_reference=channel_doc.file_reference
+                    )
+                    media_doc = raw.types.InputMediaDocument(id=input_doc)
+                    parsed_user = await sender.parser.parse(
+                        f"<b>✅ Uploaded to {TARGET_CHANNEL}</b>\n<code>{filename}</code>",
+                        enums.ParseMode.HTML
+                    )
+                    await sender.invoke(
+                        raw.functions.messages.SendMedia(
+                            peer=peer_user,
+                            media=media_doc,
+                            message=parsed_user.get("message", ""),
+                            entities=parsed_user.get("entities", None),
+                            random_id=sender.rnd_id()
+                        )
+                    )
+                else:
+                    await sender.send_message(chat_id, f"✅ <b>File uploaded to {TARGET_CHANNEL}!</b>\n<code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
+            else:
+                # Fallback: direct send to chat
+                peer = await sender.resolve_peer(chat_id)
+                parsed = await sender.parser.parse(caption or f"<code>{filename}</code>", enums.ParseMode.HTML)
+                await sender.invoke(
+                    raw.functions.messages.SendMedia(
+                        peer=peer,
+                        media=media,
+                        message=parsed.get("message", ""),
+                        entities=parsed.get("entities", None),
+                        random_id=sender.rnd_id()
+                    )
+                )
+        except Exception as e:
+            logger.error(f"Error delivering to chat {chat_id}: {e}")
 
 # --- UI MENUS ---
 def get_panel_markup(task_id):
+    def btn(text, data):
+        return InlineKeyboardButton(text, callback_data=data)
+
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎬 480p", callback_data=f"panel_480_{task_id}"),
-         InlineKeyboardButton("🎬 720p", callback_data=f"panel_720_{task_id}"),
-         InlineKeyboardButton("🎬 1080p", callback_data=f"panel_1080_{task_id}")],
-        [InlineKeyboardButton("✂️ Remove Sub", callback_data=f"panel_removesub_{task_id}"),
-         InlineKeyboardButton("📝 Add Sub", callback_data=f"panel_addsub_{task_id}")],
-        [InlineKeyboardButton("🔄 Re-encode", callback_data=f"panel_reencode_{task_id}")],
-        [InlineKeyboardButton("📤 Upload Now", callback_data=f"panel_upload_{task_id}")],
-        [InlineKeyboardButton("❌ Cancel", callback_data=f"panel_cancel_{task_id}")]
+        [btn("🔵 480p", f"panel_480_{task_id}"),
+         btn("🟢 720p", f"panel_720_{task_id}"),
+         btn("🟣 1080p", f"panel_1080_{task_id}")],
+        [btn("✂️ Remove Sub", f"panel_removesub_{task_id}"),
+         btn("📝 Add Sub", f"panel_addsub_{task_id}")],
+        [btn("🔄 Re-encode All", f"panel_reencode_{task_id}")],
+        [btn("🚀 Upload Now", f"panel_upload_{task_id}")],
+        [btn("🔴 Cancel", f"panel_cancel_{task_id}")]
     ])
 
+# Sinhala Help Menu
 async def help_cmd(client, message):
     text = (
         "<b>📚 Super Encoder & Leech Bot Help Menu</b>\n\n"
@@ -384,19 +626,21 @@ async def help_cmd(client, message):
         "<code>/reencode</code> - 480p, 720p, 1080p සහ Original එකත් එක්ක File 4ක්ම ලබා දීම.\n\n"
         "<b>✂️ Subtitles:</b>\n"
         "<code>/removesub</code> - Soft subtitles අයින් කිරීම.\n"
-        "<code>/addsub</code> - Subtitle එකතු කිරීම.\n"
+        "<code>/addsub</code> - Subtitle එකතු කිරීම (වීඩියෝ එකකට subtitle file එකක් reply කරන්න).\n"
         "<code>/extract_sub</code> - Subtitle එක වෙනම ගලවාගැනීම.\n\n"
         "<b>🎵 Audio:</b>\n"
         "<code>/addaudio</code> - අලුත් Audio Track එකක් දැමීම.\n"
         "<code>/extract_audio</code> - Audio එක වෙනම ගලවාගැනීම.\n"
         "<code>/remaudio</code> - Audio Track එක අයින් කිරීම.\n\n"
         "<b>🖼 Thumbnail:</b>\n"
-        "<code>/extract_thumb</code> - වීඩියෝ එකේ Thumbnail එක ගලවාගැනීම."
+        "<code>/extract_thumb</code> - වීඩියෝ එකේ Thumbnail එක ගලවාගැනීම.\n\n"
+        "<b>🛑 Tasks නැවැත්වීම:</b>\n"
+        "<code>/cancel_&lt;task_id&gt;</code> - ඕනෑම ක්‍රියාවලියක් නතර කිරීමට."
     )
     await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
 
-# --- PROCESS MEDIA PIPELINE ---
-async def process_media_file(client, chat_id, filepath, action, custom_renames, file_index, ui_msg, task_id):
+# --- PROCESS MEDIA PIPELINE (CONCURRENCY CONTROLLED) ---
+async def process_media_file(client, chat_id, filepath, action, custom_renames, file_index, task_id, sub_path=None, audio_path=None):
     filename = os.path.basename(filepath)
     if file_index in custom_renames: filename = custom_renames[file_index]
     
@@ -415,40 +659,159 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
             if cancel_flags.get(task_id): break
             out_file = generate_res_name(filename, res) + ".mkv"
             out_path = os.path.join(os.path.dirname(filepath), out_file)
-            success = await encode_video(filepath, out_path, res, duration, ui_msg, task_id, out_file)
+            success = await encode_video(filepath, out_path, res, duration, task_id, out_file)
             if success:
                 out_path = await apply_mkv_watermark(out_path)
                 files_to_upload.append(out_path)
     elif action == "removesub":
-        out_path = filepath + "_nosub.mkv"
+        out_path = os.path.join(os.path.dirname(filepath), "nosub_" + filename)
         cmd = ["ffmpeg", "-y", "-i", filepath, "-map", "0:v", "-map", "0:a?", "-c", "copy", out_path]
-        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, ui_msg, task_id, "✂️ Removing Subs", filename)
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "✂️ Removing Subs", filename)
         if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "addsub" and sub_path:
+        out_path = os.path.join(os.path.dirname(filepath), "sub_" + filename)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-i", sub_path, "-c", "copy", "-c:s", "srt", "-metadata:s:s:0", f"title={WATERMARK}", out_path]
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "📝 Adding Subtitle", filename)
+        if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "extract_sub":
+        out_path = os.path.join(os.path.dirname(filepath), os.path.splitext(filename)[0] + ".srt")
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-map", "0:s:0", out_path]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await proc.communicate()
+        if os.path.exists(out_path): files_to_upload.append(out_path)
+    elif action == "addaudio" and audio_path:
+        out_path = os.path.join(os.path.dirname(filepath), "audio_" + filename)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-i", audio_path, "-c", "copy", "-map", "0:v", "-map", "0:a?", "-map", "1:a", "-map", "0:s?", out_path]
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "🎵 Adding Audio", filename)
+        if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "extract_audio":
+        out_path = os.path.join(os.path.dirname(filepath), os.path.splitext(filename)[0] + ".aac")
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-vn", "-map", "0:a:0", "-c:a", "copy", out_path]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await proc.communicate()
+        if os.path.exists(out_path): files_to_upload.append(out_path)
+    elif action == "remaudio":
+        out_path = os.path.join(os.path.dirname(filepath), "noaudio_" + filename)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-map", "0:v", "-map", "0:s?", "-c", "copy", out_path]
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "🔇 Removing Audio", filename)
+        if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "extract_thumb":
+        out_path = os.path.join(os.path.dirname(filepath), os.path.splitext(filename)[0] + ".jpg")
+        cmd = ["ffmpeg", "-y", "-ss", "00:00:02", "-i", filepath, "-vframes", "1", out_path]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await proc.communicate()
+        if os.path.exists(out_path): files_to_upload.append(out_path)
     else:
-        # Default upload (Upload Now or unhandled actions for now)
+        # Default upload (Upload Now)
         files_to_upload.append(filepath)
 
-    # 2. Upload generated files
+    # 2. Upload generated files as Documents (Force File)
     for f_path in files_to_upload:
         if cancel_flags.get(task_id): break
         f_name = os.path.basename(f_path)
-        dur, width, height = await get_video_meta(f_path)
-        input_file = await parallel_upload_file(f_path, f_name, task_id, ui_msg)
+        input_file = await parallel_upload_file(f_path, f_name, task_id)
         if cancel_flags.get(task_id): break
-        await send_uploaded_media(chat_id, input_file, f_name, True, dur, width, height, CUSTOM_THUMB_PATH, f"<code>{f_name}</code>")
+        await send_uploaded_media(chat_id, input_file, f_name, CUSTOM_THUMB_PATH, f"<code>{f_name}</code>")
 
-    if not cancel_flags.get(task_id):
-        await ui_msg.edit_text("<b>✅ ක්‍රියාවලිය සාර්ථකව අවසන්!</b>", parse_mode=enums.ParseMode.HTML)
+# --- EXECUTE TASK WORKER WITH SEMAPHORE ---
+async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, is_telegram_file=False, sub_path=None, audio_path=None):
+    async with TASK_SEMAPHORE:
+        try:
+            cancel_flags[task_id] = False
+            await ensure_status_message(chat_id)
 
-# --- TELEGRAM FILE HANDLER (PANEL TRIGGER) ---
+            if is_telegram_file and media_msg:
+                dl_dir = f"/content/dl_{task_id}"
+                os.makedirs(dl_dir, exist_ok=True)
+                file_name = getattr(media_msg.document or media_msg.video, "file_name", "downloaded.mkv")
+                path = os.path.join(dl_dir, file_name)
+
+                ACTIVE_TASKS[task_id] = {
+                    "task_id": task_id,
+                    "chat_id": chat_id,
+                    "user_mention": getattr(media_msg.from_user, "mention", "User") if media_msg.from_user else "User",
+                    "filename": file_name,
+                    "status": "📥 Downloading TG File",
+                    "current": 0,
+                    "total": getattr(media_msg.document or media_msg.video, "file_size", 100),
+                    "is_time": False,
+                    "start_time": time.time(),
+                    "speed": 0,
+                    "eta": 0
+                }
+
+                # Download progress callback
+                def tg_progress(current, total):
+                    if cancel_flags.get(task_id): raise asyncio.CancelledError
+                    now = time.time()
+                    elapsed = max(now - ACTIVE_TASKS[task_id]["start_time"], 0.001)
+                    ACTIVE_TASKS[task_id]["current"] = current
+                    ACTIVE_TASKS[task_id]["total"] = total
+                    ACTIVE_TASKS[task_id]["speed"] = current / elapsed
+                    ACTIVE_TASKS[task_id]["eta"] = (total - current) / ACTIVE_TASKS[task_id]["speed"] if ACTIVE_TASKS[task_id]["speed"] > 0 else 0
+
+                path = await client.download_media(media_msg, file_name=path, progress=tg_progress)
+                await process_media_file(client, chat_id, path, action, {}, 1, task_id, sub_path, audio_path)
+                shutil.rmtree(dl_dir, ignore_errors=True)
+
+            elif not is_telegram_file and task_id in current_tasks:
+                t_data = current_tasks.pop(task_id)
+                dl_dir = f"/content/dl_{task_id}"
+                os.makedirs(dl_dir, exist_ok=True)
+                global aria2_api
+                dl = aria2_api.add_torrent(t_data["torrent"], options={"dir": dl_dir, "select-file": ",".join(map(str, t_data["selected"]))})
+                
+                ACTIVE_TASKS[task_id] = {
+                    "task_id": task_id,
+                    "chat_id": chat_id,
+                    "user_mention": t_data.get("user_mention", "User"),
+                    "filename": t_data["t_name"],
+                    "status": "📥 Downloading Torrent",
+                    "current": 0,
+                    "total": 1,
+                    "is_time": False,
+                    "start_time": time.time(),
+                    "speed": 0,
+                    "eta": 0
+                }
+
+                while dl.status not in ["complete", "error", "removed"]:
+                    await asyncio.sleep(2)
+                    dl.update()
+                    if cancel_flags.get(task_id):
+                        aria2_api.remove([dl], force=True, files=False)
+                        break
+                    if dl.total_length > 0:
+                        ACTIVE_TASKS[task_id].update({
+                            "current": dl.completed_length,
+                            "total": dl.total_length,
+                            "speed": dl.download_speed,
+                            "eta": dl.eta.total_seconds() if dl.eta else 0
+                        })
+                        
+                if not cancel_flags.get(task_id):
+                    for f in dl.files:
+                        if getattr(f, "selected", False) and os.path.exists(str(f.path)):
+                            await process_media_file(client, chat_id, str(f.path), action, {}, f.index, task_id)
+                shutil.rmtree(dl_dir, ignore_errors=True)
+
+        except asyncio.CancelledError:
+            logger.info(f"Task {task_id} was cancelled.")
+        except Exception as e:
+            logger.error(f"Task {task_id} error: {e}")
+        finally:
+            ACTIVE_TASKS.pop(task_id, None)
+            cancel_flags.pop(task_id, None)
+
+# --- TELEGRAM FILE HANDLER (PANEL TRIGGER FOR GROUPS & PRIVATE) ---
 async def handle_telegram_file(client, message):
     if not (message.document or message.video): return
     file_name = getattr(message.document or message.video, "file_name", "unknown_file.mp4")
     task_id = str(message.id)
     
     await message.reply_text(
-        f"<b>✅ ගොනුව ලැබුණා!</b>\n<code>{safe_html(file_name)}</code>\n\n"
-        "👉 කරුණාකර පහත Encoding Panel එකෙන් අවශ්‍ය ක්‍රියාව තෝරන්න:",
+        f"<b>🎬 File Detected:</b>\n<code>{safe_html(file_name)}</code>\n\n"
+        "👉 <i>Choose an action from the Encoding Panel below:</i>",
         reply_markup=get_panel_markup(task_id),
         parse_mode=enums.ParseMode.HTML,
         quote=True
@@ -457,10 +820,10 @@ async def handle_telegram_file(client, message):
 # --- LEECH COMMAND ---
 async def handle_leech(client, message):
     if len(message.command) < 2:
-        return await message.reply("Please provide a magnet link! Example: `/leech magnet:?...`")
+        return await message.reply("Please provide a magnet link! Example: <code>/leech magnet:?...</code>", parse_mode=enums.ParseMode.HTML)
     magnet = message.command[1]
     
-    status_msg = await message.reply("🔍 ටොරන්ට් දත්ත ලබාගනිමින් පවතී...")
+    status_msg = await message.reply("🔍 <i>Fetching torrent metadata...</i>", parse_mode=enums.ParseMode.HTML)
     temp_dir = f"/content/meta_{message.id}"
     os.makedirs(temp_dir, exist_ok=True)
     
@@ -470,7 +833,7 @@ async def handle_leech(client, message):
         await proc.communicate()
         
         t_file = next((os.path.join(temp_dir, n) for n in os.listdir(temp_dir) if n.endswith(".torrent")), None)
-        if not t_file: return await status_msg.edit_text("❌ Torrent metadata ලබාගැනීම අසාර්ථකයි.")
+        if not t_file: return await status_msg.edit_text("❌ Failed to fetch torrent metadata.")
         
         global aria2_api
         meta_dl = aria2_api.add_torrent(t_file, options={"pause": "true"})
@@ -479,8 +842,9 @@ async def handle_leech(client, message):
         tree_html = build_file_tree(files, True)
         tree_txt = build_file_tree(files, False)
         
-        caption = (f"✅ <b>ගොනුව හඳුනාගත්තා!</b>\n\n👉 <b>මෙම පණිවිඩයට Reply කරමින්</b> අවශ්‍ය file අංක දෙන්න.\n"
-                   f"උදා: <code>1,3,5-7</code> (සියල්ලට: <code>all</code>)")
+        caption = (f"✅ <b>Torrent Identified!</b>\n\n"
+                   f"👉 <b>Reply to this message</b> with file numbers to download.\n"
+                   f"Example: <code>1,3,5-7</code> (or <code>all</code> for everything)")
         
         if len(tree_html) > 3500:
             txt_path = os.path.join(temp_dir, "file_list.txt")
@@ -490,7 +854,13 @@ async def handle_leech(client, message):
             prompt = await message.reply_text(f"<b>Files:</b>\n{tree_html}\n\n{caption}", parse_mode=enums.ParseMode.HTML)
             
         task_id = str(prompt.id)
-        current_tasks[task_id] = {"torrent": t_file, "files": files, "t_name": t_name, "temp": temp_dir}
+        current_tasks[task_id] = {
+            "torrent": t_file,
+            "files": files,
+            "t_name": t_name,
+            "temp": temp_dir,
+            "user_mention": message.from_user.mention if message.from_user else "User"
+        }
         await status_msg.delete()
     except Exception as e:
         await status_msg.edit_text(f"❌ Error: {e}")
@@ -499,31 +869,62 @@ async def handle_leech(client, message):
 async def reply_handler(client, message):
     if not message.reply_to_message: return
     r_id = str(message.reply_to_message.id)
-    text = message.text.strip().lower()
+    text = (message.text or message.caption or "").strip().lower()
     
+    # Check pending subtitle reply
+    if r_id in pending_sub_replies and (message.document or message.video):
+        media_msg = pending_sub_replies.pop(r_id)
+        sub_dir = f"/content/sub_{message.id}"
+        os.makedirs(sub_dir, exist_ok=True)
+        sub_path = await client.download_media(message, file_name=sub_dir + "/")
+        task_id = str(message.id)
+        asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, "addsub", media_msg=media_msg, is_telegram_file=True, sub_path=sub_path))
+        return
+
+    # Check pending audio reply
+    if r_id in pending_audio_replies and (message.audio or message.document):
+        media_msg = pending_audio_replies.pop(r_id)
+        aud_dir = f"/content/aud_{message.id}"
+        os.makedirs(aud_dir, exist_ok=True)
+        aud_path = await client.download_media(message, file_name=aud_dir + "/")
+        task_id = str(message.id)
+        asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, "addaudio", media_msg=media_msg, is_telegram_file=True, audio_path=aud_path))
+        return
+
     # 1. Torrent File Selection
     if r_id in current_tasks:
         task_data = current_tasks.pop(r_id)
         selected = parse_selection(text, len(task_data["files"]))
-        if not selected: return await message.reply("❌ Invalid selection.")
+        if not selected: return await message.reply("❌ Invalid file selection. Please enter numbers like <code>1,2,3</code> or <code>all</code>.", parse_mode=enums.ParseMode.HTML)
         
         task_data["selected"] = selected
         new_task_id = str(message.id)
         current_tasks[new_task_id] = task_data
         
         await message.reply_text(
-            f"✅ Files තෝරාගත්තා! කරුණාකර පහත Encoding Panel එකෙන් අවශ්‍ය ක්‍රියාව තෝරන්න:",
+            f"✅ <b>Files Selected!</b> Choose an action from the Encoding Panel:",
             reply_markup=get_panel_markup(new_task_id),
             parse_mode=enums.ParseMode.HTML,
             quote=True
         )
         return
         
-    # 2. Direct Reply Commands on Media (/480, /removesub, etc.)
+    # 2. Direct Reply Commands on Media (/480, /removesub, /extract_sub, etc.)
     if message.reply_to_message.document or message.reply_to_message.video:
         if text.startswith("/"):
-            action = text.replace("/", "")
-            await handle_panel_action(client, message.reply_to_message.chat.id, str(message.id), action, message.reply_to_message, is_telegram_file=True)
+            action = text.replace("/", "").split()[0].replace(f"@{client.me.username}" if client.me else "", "")
+            
+            if action == "addsub":
+                prompt = await message.reply("📝 <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
+                pending_sub_replies[str(prompt.id)] = message.reply_to_message
+                return
+            elif action == "addaudio":
+                prompt = await message.reply("🎵 <b>Please reply to THIS message with your audio file (.aac, .m4a, .mp3, etc.)</b>", parse_mode=enums.ParseMode.HTML)
+                pending_audio_replies[str(prompt.id)] = message.reply_to_message
+                return
+            elif action in ["480", "720", "1080", "reencode", "removesub", "extract_sub", "extract_audio", "remaudio", "extract_thumb"]:
+                task_id = str(message.id)
+                asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, action, media_msg=message.reply_to_message, is_telegram_file=True))
 
 # --- PANEL CALLBACKS ---
 async def cb_handler(client, cb):
@@ -533,48 +934,43 @@ async def cb_handler(client, cb):
         action, task_id = parts[1], parts[2]
         
         if action == "cancel":
-            return await cb.message.edit_text("🚫 <b>ක්‍රියාවලිය අවලංගු කරන ලදී.</b>", parse_mode=enums.ParseMode.HTML)
+            cancel_flags[task_id] = True
+            return await cb.message.edit_text("🚫 <b>Task cancelled.</b>", parse_mode=enums.ParseMode.HTML)
             
-        await cb.message.edit_reply_markup(None)
-        await handle_panel_action(client, cb.message.chat.id, task_id, action, cb.message.reply_to_message, is_telegram_file=(task_id not in current_tasks))
+        if action == "addsub":
+            await cb.message.edit_reply_markup(None)
+            prompt = await cb.message.reply("📝 <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
+            pending_sub_replies[str(prompt.id)] = cb.message.reply_to_message
+            return
 
-async def handle_panel_action(client, chat_id, task_id, action, media_msg=None, is_telegram_file=False):
-    ui_msg = await client.send_message(chat_id, "⏳ <b>Processing ආරම්භ කරමින්...</b>", parse_mode=enums.ParseMode.HTML)
-    cancel_flags[task_id] = False
-    
-    if is_telegram_file and media_msg:
-        # Download from TG
-        dl_dir = f"/content/dl_{task_id}"
-        os.makedirs(dl_dir, exist_ok=True)
-        file_name = getattr(media_msg.document or media_msg.video, "file_name", "downloaded.mkv")
-        path = os.path.join(dl_dir, file_name)
-        await ui_msg.edit_text("📥 <b>Telegram වෙතින් භාගත කරමින් පවතී...</b>", parse_mode=enums.ParseMode.HTML)
-        path = await client.download_media(media_msg, file_name=path)
-        await process_media_file(client, chat_id, path, action, {}, 1, ui_msg, task_id)
-        shutil.rmtree(dl_dir, ignore_errors=True)
-    elif not is_telegram_file and task_id in current_tasks:
-        # Download from Torrent
-        t_data = current_tasks.pop(task_id)
-        dl_dir = f"/content/dl_{task_id}"
-        os.makedirs(dl_dir, exist_ok=True)
-        global aria2_api
-        dl = aria2_api.add_torrent(t_data["torrent"], options={"dir": dl_dir, "select-file": ",".join(map(str, t_data["selected"]))})
+        await cb.message.edit_reply_markup(None)
+        is_tg = (task_id not in current_tasks)
+        asyncio.create_task(execute_task_worker(client, cb.message.chat.id, task_id, action, media_msg=cb.message.reply_to_message, is_telegram_file=is_tg))
+
+# --- CANCEL COMMAND ---
+async def cancel_cmd(client, message):
+    cmd_text = message.text.strip()
+    task_id = None
+    if "_" in cmd_text:
+        task_id = cmd_text.split("_", 1)[1].split()[0]
+    elif len(message.command) > 1:
+        task_id = message.command[1]
         
-        while dl.status not in ["complete", "error", "removed"]:
-            await asyncio.sleep(2)
-            dl.update()
-            if cancel_flags.get(task_id):
-                aria2_api.remove([dl], force=True, files=False)
-                break
-            if dl.total_length > 0:
-                await update_ui(ui_msg, "📥 Torrent Download", t_data["t_name"], dl.completed_length, dl.total_length, time.time(), [0], task_id)
-                
-        if cancel_flags.get(task_id): return await ui_msg.edit_text("🚫 Cancelled.")
-        
-        for f in dl.files:
-            if getattr(f, "selected", False) and os.path.exists(str(f.path)):
-                await process_media_file(client, chat_id, str(f.path), action, {}, f.index, ui_msg, task_id)
-        shutil.rmtree(dl_dir, ignore_errors=True)
+    if task_id and (task_id in ACTIVE_TASKS or task_id in cancel_flags):
+        cancel_flags[task_id] = True
+        await message.reply(f"🛑 <b>Task <code>{task_id}</code> is stopping...</b>", parse_mode=enums.ParseMode.HTML)
+    else:
+        await message.reply("❌ Task not found or already finished.")
+
+# --- START COMMAND ---
+async def start_cmd(client, message):
+    await message.reply(
+        "⚡ <b>Colab Worker 3.0 is Online & Ready!</b>\n\n"
+        "• Use <code>/leech &lt;magnet_link&gt;</code> to download torrents.\n"
+        "• Send or reply to any video to open the <b>Encoding Panel</b>.\n"
+        "• Use <code>/help</code> for commands list (සිංහල).",
+        parse_mode=enums.ParseMode.HTML
+    )
 
 # --- START WEBSOCKET LOOP ---
 async def heartbeat_loop(websocket):
@@ -607,26 +1003,25 @@ async def main():
             app = Client("colab_worker", api_id=api_id, api_hash=api_hash, bot_token=bot_token, in_memory=True)
             upload_client = app
             
-            # Register Handlers Programmatically
+            # Register Handlers for Private AND Group chats
             app.add_handler(MessageHandler(start_cmd, filters.command("start")))
             app.add_handler(MessageHandler(help_cmd, filters.command("help")))
             app.add_handler(MessageHandler(handle_leech, filters.command("leech")))
-            app.add_handler(MessageHandler(handle_telegram_file, (filters.document | filters.video) & filters.private))
-            app.add_handler(MessageHandler(reply_handler, filters.reply & filters.text))
+            app.add_handler(MessageHandler(cancel_cmd, filters.regex(r"^/cancel")))
+            app.add_handler(MessageHandler(handle_telegram_file, (filters.document | filters.video)))
+            app.add_handler(MessageHandler(reply_handler, filters.reply))
             app.add_handler(CallbackQueryHandler(cb_handler))
             
             asyncio.create_task(heartbeat_loop(ws))
+            asyncio.create_task(global_ui_loop())
             await app.start()
-            logger.info("✅ Colab Worker is ONLINE!")
+            logger.info("✅ Colab Worker 3.0 is ONLINE with Global Progress UI & Multi-Tasking!")
             await ws.wait_closed()
             
     except Exception as e:
         logger.error(f"Failed to connect: {e}")
     finally:
         if app and app.is_connected: await app.stop()
-
-async def start_cmd(client, message):
-    await message.reply("⚡ **Colab Worker is Online & Ready!**\nUse `/leech <magnet_link>` to start downloading or `/help` to see commands.")
 
 if __name__ == "__main__":
     asyncio.run(main())
