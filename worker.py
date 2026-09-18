@@ -158,6 +158,70 @@ def safe_html(text): return html.escape(str(text), quote=False)
 
 def get_mime_type(path): return mimetypes.guess_type(path)[0] or "application/octet-stream"
 
+# --- TORRENT PARSER (No aria2p needed) ---
+def _bdecode(data, pos=0):
+    ch = data[pos:pos+1]
+    if ch == b'i':
+        end = data.index(b'e', pos)
+        return int(data[pos+1:end]), end + 1
+    elif ch == b'l':
+        lst, pos = [], pos + 1
+        while data[pos:pos+1] != b'e':
+            val, pos = _bdecode(data, pos)
+            lst.append(val)
+        return lst, pos + 1
+    elif ch == b'd':
+        dct, pos = {}, pos + 1
+        while data[pos:pos+1] != b'e':
+            key, pos = _bdecode(data, pos)
+            val, pos = _bdecode(data, pos)
+            if isinstance(key, bytes): key = key.decode('utf-8', errors='ignore')
+            dct[key] = val
+        return dct, pos + 1
+    elif ch.isdigit() or ch == b'0':
+        colon = data.index(b':', pos)
+        length = int(data[pos:colon])
+        start = colon + 1
+        return data[start:start+length], start + length
+    raise ValueError(f"Invalid bencode at {pos}")
+
+def parse_torrent_info(torrent_path):
+    """Parse .torrent file directly - no aria2p needed."""
+    with open(torrent_path, 'rb') as f:
+        data = f.read()
+    torrent, _ = _bdecode(data)
+    info = torrent.get('info', {})
+    name = info.get('name', b'Unknown')
+    if isinstance(name, bytes): name = name.decode('utf-8', errors='ignore')
+    files_list = info.get('files', [])
+    if files_list:
+        file_count = len(files_list)
+        total_size = sum(f.get('length', 0) for f in files_list)
+    else:
+        file_count = 1
+        total_size = info.get('length', 0)
+    return name, file_count, total_size
+
+def _get_dir_size(path):
+    """Get total size of all files in directory."""
+    total = 0
+    for dp, dn, fns in os.walk(path):
+        for fn in fns:
+            fp = os.path.join(dp, fn)
+            try: total += os.path.getsize(fp)
+            except: pass
+    return total
+
+def _get_all_media_files(path):
+    """Get all video/media files from a directory recursively."""
+    media_exts = {'.mkv', '.mp4', '.avi', '.webm', '.mov', '.flv', '.wmv', '.ts', '.m4v'}
+    files = []
+    for dp, dn, fns in os.walk(path):
+        for fn in sorted(fns):
+            if os.path.splitext(fn)[1].lower() in media_exts:
+                files.append(os.path.join(dp, fn))
+    return files
+
 def parse_selection(selection_str, max_idx):
     if selection_str.lower() == "all": return list(range(1, max_idx + 1))
     indices = []
@@ -694,44 +758,80 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                 if not custom_renames: custom_renames = t_data.get("custom_renames", {})
                 dl_dir = f"/content/dl_{task_id}"
                 os.makedirs(dl_dir, exist_ok=True)
-                global aria2_api
-                dl = aria2_api.add_torrent(t_data["torrent"], options={"dir": dl_dir, "select-file": ",".join(map(str, t_data["selected"]))})
+                
+                # Use aria2c subprocess directly (avoids aria2p RPC timeout on large torrents)
+                t_name = t_data["t_name"]
+                _, _, est_total = parse_torrent_info(t_data["torrent"])
+                
+                aria2_cmd = [
+                    "aria2c", "--dir", dl_dir, "--seed-time=0",
+                    "--console-log-level=error", "--summary-interval=0",
+                    "--file-allocation=none", "--max-connection-per-server=8",
+                    "--split=8", "--min-split-size=1M",
+                    t_data["torrent"]
+                ]
+                dl_proc = await asyncio.create_subprocess_exec(
+                    *aria2_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                )
                 
                 ACTIVE_TASKS[task_id] = {
                     "task_id": task_id,
                     "chat_id": chat_id,
                     "user_mention": t_data.get("user_mention", "User"),
-                    "filename": t_data["t_name"],
+                    "filename": t_name,
                     "status": "📥 Downloading Torrent",
                     "current": 0,
-                    "total": 1,
+                    "total": max(est_total, 1),
                     "is_time": False,
                     "start_time": time.time(),
                     "speed": 0,
                     "eta": 0
                 }
 
-                while dl.status not in ["complete", "error", "removed"]:
-                    await asyncio.sleep(2)
-                    dl.update()
+                # Monitor progress by checking disk usage
+                prev_size = 0
+                while dl_proc.returncode is None:
+                    await asyncio.sleep(3)
+                    try:
+                        dl_proc_status = dl_proc.returncode
+                    except:
+                        dl_proc_status = None
+                    
                     if cancel_flags.get(task_id):
-                        aria2_api.remove([dl], force=True, files=False)
+                        dl_proc.terminate()
                         break
-                    if dl.total_length > 0:
-                        ACTIVE_TASKS[task_id].update({
-                            "current": dl.completed_length,
-                            "total": dl.total_length,
-                            "speed": dl.download_speed,
-                            "eta": dl.eta.total_seconds() if dl.eta else 0
-                        })
-                        if dl.completed_length >= dl.total_length:
-                            aria2_api.remove([dl], force=True, files=False)
-                            break
-                        
+                    
+                    current_size = _get_dir_size(dl_dir)
+                    now = time.time()
+                    elapsed = max(now - ACTIVE_TASKS[task_id]["start_time"], 0.001)
+                    speed = current_size / elapsed
+                    remaining = max(est_total - current_size, 0)
+                    eta = remaining / speed if speed > 0 else 0
+                    
+                    ACTIVE_TASKS[task_id].update({
+                        "current": current_size,
+                        "total": max(est_total, current_size),
+                        "speed": speed,
+                        "eta": eta
+                    })
+                    prev_size = current_size
+                    
+                    # Check if process finished
+                    if dl_proc_status is not None:
+                        break
+                
+                # Wait for process to fully finish
+                try:
+                    await asyncio.wait_for(dl_proc.wait(), timeout=10)
+                except:
+                    pass
+                
+                # Process all downloaded media files
                 if not cancel_flags.get(task_id):
-                    for f in dl.files:
-                        if getattr(f, "selected", False) and os.path.exists(str(f.path)):
-                            await process_media_file(client, chat_id, str(f.path), action, custom_renames, f.index, task_id)
+                    media_files = _get_all_media_files(dl_dir)
+                    for idx, fpath in enumerate(media_files, 1):
+                        if cancel_flags.get(task_id): break
+                        await process_media_file(client, chat_id, fpath, action, custom_renames, idx, task_id)
                 shutil.rmtree(dl_dir, ignore_errors=True)
 
         except asyncio.CancelledError:
@@ -808,34 +908,12 @@ async def handle_leech(client, message):
         t_file = next((os.path.join(temp_dir, n) for n in os.listdir(temp_dir) if n.endswith(".torrent")), None)
         if not t_file: return await status_msg.edit_text("❌ Failed to fetch torrent metadata.")
         
-        global aria2_api
-        
-        # Make a copy of the .torrent file for metadata extraction so it doesn't get deleted
-        t_file_meta = t_file + ".meta.torrent"
-        import shutil
-        shutil.copy(t_file, t_file_meta)
-        
-        # Retry logic for large torrents that may timeout
-        for _attempt in range(3):
-            try:
-                meta_dl = aria2_api.add_torrent(t_file_meta, options={"pause": "true"})
-                files, t_name = meta_dl.files, meta_dl.name
-                aria2_api.remove([meta_dl], force=True, files=False)
-                break
-            except Exception as retry_err:
-                if _attempt == 2:
-                    raise retry_err
-                logger.warning(f"aria2 RPC retry {_attempt+1}: {retry_err}")
-                await asyncio.sleep(2)
-        
-        # Auto-select all files and start download + upload immediately (no menus)
-        total_size = sum(f.length for f in files if f.length)
-        file_count = len(files)
+        # Parse torrent metadata directly (no aria2p - avoids RPC timeout on large torrents)
+        t_name, file_count, total_size = parse_torrent_info(t_file)
         
         task_id = str(message.id)
         current_tasks[task_id] = {
             "torrent": t_file,
-            "files": files,
             "t_name": t_name,
             "temp": temp_dir,
             "selected": list(range(1, file_count + 1)),
