@@ -819,19 +819,9 @@ async def handle_leech(client, message):
         files, t_name = meta_dl.files, meta_dl.name
         aria2_api.remove([meta_dl], force=True, files=False)
         
-        # Auto-select all files and show encoding panel directly (no file list)
+        # Auto-select all files and start download + upload immediately (no menus)
         total_size = sum(f.length for f in files if f.length)
         file_count = len(files)
-        
-        prompt = await message.reply_text(
-            f"✅ <b>Torrent Identified!</b>\n\n"
-            f"📦 <b>Name:</b> <code>{safe_html(t_name)}</code>\n"
-            f"📁 <b>Files:</b> {file_count}\n"
-            f"💾 <b>Total Size:</b> {format_bytes(total_size)}\n\n"
-            "👇 <i>Choose an action from the Encoding Panel below:</i>",
-            reply_markup=get_panel_markup(str(message.id)),
-            parse_mode=enums.ParseMode.HTML
-        )
         
         task_id = str(message.id)
         current_tasks[task_id] = {
@@ -842,7 +832,18 @@ async def handle_leech(client, message):
             "selected": list(range(1, file_count + 1)),
             "user_mention": message.from_user.mention if message.from_user else "User"
         }
-        await status_msg.delete()
+        
+        await status_msg.edit_text(
+            f"✅ <b>Torrent Started!</b>\n\n"
+            f"📦 <b>Name:</b> <code>{safe_html(t_name)}</code>\n"
+            f"📁 <b>Files:</b> {file_count}\n"
+            f"💾 <b>Total Size:</b> {format_bytes(total_size)}\n\n"
+            f"🚀 <i>Downloading & uploading all files...</i>\n"
+            f"🛑 Stop: <code>/cancel_{task_id}</code>",
+            parse_mode=enums.ParseMode.HTML
+        )
+        
+        asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, "upload", is_telegram_file=False))
     except Exception as e:
         await status_msg.edit_text(f"❌ Error: {e}")
 
