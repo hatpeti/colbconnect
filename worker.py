@@ -815,9 +815,18 @@ async def handle_leech(client, message):
         import shutil
         shutil.copy(t_file, t_file_meta)
         
-        meta_dl = aria2_api.add_torrent(t_file_meta, options={"pause": "true"})
-        files, t_name = meta_dl.files, meta_dl.name
-        aria2_api.remove([meta_dl], force=True, files=False)
+        # Retry logic for large torrents that may timeout
+        for _attempt in range(3):
+            try:
+                meta_dl = aria2_api.add_torrent(t_file_meta, options={"pause": "true"})
+                files, t_name = meta_dl.files, meta_dl.name
+                aria2_api.remove([meta_dl], force=True, files=False)
+                break
+            except Exception as retry_err:
+                if _attempt == 2:
+                    raise retry_err
+                logger.warning(f"aria2 RPC retry {_attempt+1}: {retry_err}")
+                await asyncio.sleep(2)
         
         # Auto-select all files and start download + upload immediately (no menus)
         total_size = sum(f.length for f in files if f.length)
@@ -999,7 +1008,7 @@ async def heartbeat_loop(websocket):
 async def main():
     global app, user_app, upload_client, aria2_api
     
-    aria2_api = aria2p.API(aria2p.Client(host="http://localhost", port=6800, secret=""))
+    aria2_api = aria2p.API(aria2p.Client(host="http://localhost", port=6800, secret="", timeout=120))
     subprocess.Popen(["aria2c", "--enable-rpc=true", "--rpc-listen-all=false", "--rpc-listen-port=6800", "--daemon=true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     key = str(random.randint(100000, 999999))
