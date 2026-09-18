@@ -630,6 +630,22 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
             pass
         except Exception as e:
             logger.error(f"Upload error: {e}")
+        else:
+            # Delete file from server after successful upload to TG
+            try:
+                if os.path.exists(f_path) and f_path != filepath:
+                    os.remove(f_path)
+                    logger.info(f"🗑️ Deleted uploaded file: {f_name}")
+            except Exception as e:
+                logger.error(f"Delete error: {e}")
+
+    # Delete original source file after all uploads are done
+    try:
+        if os.path.exists(filepath) and files_to_upload:
+            os.remove(filepath)
+            logger.info(f"🗑️ Deleted original source: {os.path.basename(filepath)}")
+    except Exception as e:
+        logger.error(f"Source delete error: {e}")
 
 # --- EXECUTE TASK WORKER WITH SEMAPHORE ---
 async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, is_telegram_file=False, sub_path=None, audio_path=None, custom_renames=None):
@@ -803,26 +819,27 @@ async def handle_leech(client, message):
         files, t_name = meta_dl.files, meta_dl.name
         aria2_api.remove([meta_dl], force=True, files=False)
         
-        tree_html = build_file_tree(files, True)
-        tree_txt = build_file_tree(files, False)
+        # Auto-select all files and show encoding panel directly (no file list)
+        total_size = sum(f.length for f in files if f.length)
+        file_count = len(files)
         
-        caption = (f"✅ <b>Torrent Identified!</b>\n\n"
-                   f"👉 <b>Reply to this message</b> with file numbers to download.\n"
-                   f"Example: <code>1,3,5-7</code> (or <code>all</code> for everything)")
+        prompt = await message.reply_text(
+            f"✅ <b>Torrent Identified!</b>\n\n"
+            f"📦 <b>Name:</b> <code>{safe_html(t_name)}</code>\n"
+            f"📁 <b>Files:</b> {file_count}\n"
+            f"💾 <b>Total Size:</b> {format_bytes(total_size)}\n\n"
+            "👇 <i>Choose an action from the Encoding Panel below:</i>",
+            reply_markup=get_panel_markup(str(message.id)),
+            parse_mode=enums.ParseMode.HTML
+        )
         
-        if len(tree_html) > 3500:
-            txt_path = os.path.join(temp_dir, "file_list.txt")
-            with open(txt_path, "w") as f: f.write(tree_txt)
-            prompt = await message.reply_document(document=txt_path, caption=caption, parse_mode=enums.ParseMode.HTML)
-        else:
-            prompt = await message.reply_text(f"<b>Files:</b>\n{tree_html}\n\n{caption}", parse_mode=enums.ParseMode.HTML)
-            
-        task_id = str(prompt.id)
+        task_id = str(message.id)
         current_tasks[task_id] = {
             "torrent": t_file,
             "files": files,
             "t_name": t_name,
             "temp": temp_dir,
+            "selected": list(range(1, file_count + 1)),
             "user_mention": message.from_user.mention if message.from_user else "User"
         }
         await status_msg.delete()
