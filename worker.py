@@ -176,12 +176,32 @@ async def download_with_retry(client, message, file_name, chat_id=None, msg_id=N
     last_error = None
     current_msg = message
     
+    # Log file info for debugging
+    media = message.document or message.video
+    if media:
+        dc_id = getattr(media, "dc_id", "?")
+        file_size = getattr(media, "file_size", 0)
+        file_ref = getattr(media, "file_reference", None)
+        ref_hex = file_ref[:8].hex() + "..." if file_ref and len(file_ref) > 8 else str(file_ref)
+        logger.info(f"📋 File info: DC={dc_id}, size={format_bytes(file_size)}, ref={ref_hex}")
+    
     for attempt in range(1, max_retries + 1):
         try:
             logger.info(f"Download attempt {attempt}/{max_retries} for {os.path.basename(file_name)}")
             
             # On retry (attempt > 1): restart session + re-fetch message for fresh file_reference
             if attempt > 1:
+                # Send diagnostic to chat so user can see progress
+                if chat_id:
+                    with contextlib.suppress(Exception):
+                        await client.send_message(
+                            chat_id,
+                            f"🔄 <b>Download retry {attempt}/{max_retries}</b>\n"
+                            f"├ Refreshing connection & file reference...\n"
+                            f"└ Previous error: <code>{safe_html(str(last_error)[:150])}</code>",
+                            parse_mode=enums.ParseMode.HTML
+                        )
+                
                 # 1. Restart client to force new DC connection
                 try:
                     if client.is_connected:
@@ -204,11 +224,14 @@ async def download_with_retry(client, message, file_name, chat_id=None, msg_id=N
                         fresh_msg = await client.get_messages(chat_id, msg_id)
                         if fresh_msg and (fresh_msg.document or fresh_msg.video):
                             current_msg = fresh_msg
-                            logger.info(f"Re-fetched message {msg_id} with fresh file_reference")
+                            fresh_media = fresh_msg.document or fresh_msg.video
+                            new_ref = getattr(fresh_media, "file_reference", None)
+                            new_hex = new_ref[:8].hex() + "..." if new_ref and len(new_ref) > 8 else "None"
+                            logger.info(f"✅ Fresh file_reference: {new_hex}")
                         else:
-                            logger.warning(f"Re-fetched message {msg_id} but no media found, using previous reference")
+                            logger.warning(f"Re-fetched message {msg_id} but no media found")
                     except Exception as gm_err:
-                        logger.warning(f"Failed to re-fetch message: {gm_err}, using previous reference")
+                        logger.warning(f"Failed to re-fetch message: {gm_err}")
                 
                 # 3. Clean up any partial download from previous attempt
                 if os.path.exists(file_name):
@@ -241,7 +264,7 @@ async def download_with_retry(client, message, file_name, chat_id=None, msg_id=N
             await asyncio.sleep(wait)
         except Exception as e:
             last_error = e
-            logger.warning(f"Download attempt {attempt}/{max_retries} failed: {e}")
+            logger.warning(f"❌ Download attempt {attempt}/{max_retries} failed: {e}")
             if attempt == max_retries:
                 break
             # Exponential backoff: 10s, 20s, 40s, 60s...
