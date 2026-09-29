@@ -29,6 +29,16 @@ logging.getLogger("wzgram").setLevel(logging.ERROR)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Reduce wzgram's internal retry count from 10 to 3
+# This prevents hammering DC5 with rapid-fire GetFile requests
+# Our outer retry loop handles reconnection with fresh file_reference instead
+try:
+    from wzgram.session import Session
+    Session.MAX_RETRIES = 3
+    logger.info("wzgram Session.MAX_RETRIES set to 3")
+except Exception:
+    pass
+
 MASTER_WS_URL = "wss://leech-production-214b.up.railway.app"
 TARGET_CHANNEL = "@animedubsinhla"
 WATERMARK = "@animesinhala1"
@@ -267,8 +277,8 @@ async def download_with_retry(client, message, file_name, chat_id=None, msg_id=N
             logger.warning(f"❌ Download attempt {attempt}/{max_retries} failed: {e}")
             if attempt == max_retries:
                 break
-            # Exponential backoff: 10s, 20s, 40s, 60s...
-            wait_time = min(10 * (2 ** (attempt - 1)), 60)
+            # Longer backoff to let DC5 cooldown: 30s, 60s, 120s, 180s, 180s...
+            wait_time = min(30 * (2 ** (attempt - 1)), 180)
             logger.info(f"⏳ Waiting {wait_time}s before retry (fresh session + file_reference)...")
             await asyncio.sleep(wait_time)
     raise Exception(f"Download failed after {max_retries} attempts. Last error: {last_error}")
