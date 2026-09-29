@@ -168,13 +168,22 @@ async def download_with_retry(client, message, file_name, progress=None, max_ret
     for attempt in range(1, max_retries + 1):
         try:
             logger.info(f"Download attempt {attempt}/{max_retries} for {os.path.basename(file_name)}")
+            
+            # Ensure client is connected before download
+            if not client.is_connected:
+                logger.warning("Client disconnected, reconnecting...")
+                try:
+                    await client.start()
+                except Exception as rc_err:
+                    logger.warning(f"Reconnect attempt failed: {rc_err}")
+            
             path = await client.download_media(message, file_name=file_name, progress=progress)
             if path and os.path.exists(path):
                 file_size = os.path.getsize(path)
                 expected_size = getattr(message.document or message.video, "file_size", 0)
                 if expected_size > 0 and file_size < expected_size * 0.95:
                     logger.warning(f"Downloaded file size ({file_size}) is less than expected ({expected_size}), retrying...")
-                    os.remove(path)
+                    with contextlib.suppress(Exception): os.remove(path)
                     raise Exception(f"Incomplete download: got {file_size} bytes, expected {expected_size}")
                 logger.info(f"Download successful: {path} ({format_bytes(file_size)})")
                 return path
@@ -191,8 +200,11 @@ async def download_with_retry(client, message, file_name, progress=None, max_ret
             if attempt == max_retries:
                 break
             wait_time = min(2 ** attempt * 3, 60)
-            logger.info(f"Retrying download in {wait_time}s...")
+            logger.info(f"Retrying download in {wait_time}s... (waiting for connection recovery)")
             await asyncio.sleep(wait_time)
+            # Try to clean up partial download
+            if os.path.exists(file_name):
+                with contextlib.suppress(Exception): os.remove(file_name)
     raise Exception(f"Download failed after {max_retries} attempts. Last error: {last_error}")
 
 async def upload_with_retry(client, chat_id, f_path, f_name, thumb, progress=None, max_retries=UPLOAD_MAX_RETRIES):
@@ -1029,28 +1041,51 @@ async def cb_handler(client, cb):
         if action == "cancel":
             cancel_flags[task_id] = True
             return await cb.message.edit_text("🚫 <b>Task cancelled.</b>", parse_mode=enums.ParseMode.HTML)
-            
+        
+        # ALWAYS fetch the full original message to ensure media data is available
+        # callback query's reply_to_message often doesn't contain document/video data
+        media_target = None
+        try:
+            media_target = await client.get_messages(cb.message.chat.id, int(task_id))
+            if media_target and not (media_target.document or media_target.video):
+                logger.warning(f"get_messages({task_id}): message found but no media, trying reply_to_message")
+                media_target = None
+        except Exception as e:
+            logger.warning(f"get_messages({task_id}) failed: {e}")
+        
+        # Fallback to reply_to_message
+        if not media_target:
+            media_target = cb.message.reply_to_message
+        
         if action == "addsub":
             await cb.message.edit_reply_markup(None)
             prompt = await cb.message.reply("📝 <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
-            pending_sub_replies[str(prompt.id)] = cb.message.reply_to_message
+            pending_sub_replies[str(prompt.id)] = media_target
             return
 
         if action == "rename":
             await cb.message.edit_reply_markup(None)
             prompt = await cb.message.reply("✏️ <b>Please reply to THIS message with the NEW NAME (with extension, e.g. video.mkv):</b>", parse_mode=enums.ParseMode.HTML)
             is_tg = (task_id not in current_tasks)
-            pending_renames[str(prompt.id)] = {"task_id": task_id, "is_tg": is_tg, "media_msg": cb.message.reply_to_message}
+            pending_renames[str(prompt.id)] = {"task_id": task_id, "is_tg": is_tg, "media_msg": media_target}
             return
 
         await cb.message.edit_reply_markup(None)
         is_tg = (task_id not in current_tasks)
-        media_target = cb.message.reply_to_message
-        if not media_target and is_tg:
-            try:
-                media_target = await client.get_messages(cb.message.chat.id, int(task_id))
-            except:
-                pass
+        
+        # Final validation: make sure we have a valid media message
+        if is_tg and (not media_target or not (media_target.document or media_target.video)):
+            logger.error(f"No valid media found for task {task_id}")
+            await cb.message.reply(
+                "❌ <b>Error:</b> Could not find the original file message.\n"
+                "🔄 <b>Please re-send the video and try again.</b>",
+                parse_mode=enums.ParseMode.HTML
+            )
+            return
+        
+        logger.info(f"Starting task {task_id}: action={action}, is_tg={is_tg}, "
+                     f"has_doc={bool(media_target and media_target.document)}, "
+                     f"has_vid={bool(media_target and media_target.video)}")
         asyncio.create_task(execute_task_worker(client, cb.message.chat.id, task_id, action, media_msg=media_target, is_telegram_file=is_tg))
 
 # --- CANCEL COMMAND ---
