@@ -873,14 +873,20 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                 dl_dir = f"/content/dl_{task_id}"
                 os.makedirs(dl_dir, exist_ok=True)
                 global aria2_api
-                dl = aria2_api.add_torrent(t_data["torrent"], options={"dir": dl_dir, "select-file": ",".join(map(str, t_data["selected"]))})
+                
+                if "url" in t_data:
+                    dl = aria2_api.add_uris([t_data["url"]], options={"dir": dl_dir})
+                    dl_type = "URL"
+                else:
+                    dl = aria2_api.add_torrent(t_data["torrent"], options={"dir": dl_dir, "select-file": ",".join(map(str, t_data["selected"]))})
+                    dl_type = "Torrent"
                 
                 ACTIVE_TASKS[task_id] = {
                     "task_id": task_id,
                     "chat_id": chat_id,
                     "user_mention": t_data.get("user_mention", "User"),
                     "filename": t_data["t_name"],
-                    "status": "📥 Downloading Torrent",
+                    "status": f"📥 Downloading {dl_type}",
                     "current": 0,
                     "total": 1,
                     "is_time": False,
@@ -908,7 +914,7 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                         
                 if not cancel_flags.get(task_id):
                     for f in dl.files:
-                        if getattr(f, "selected", False) and os.path.exists(str(f.path)):
+                        if (getattr(f, "selected", False) or "url" in t_data) and os.path.exists(str(f.path)):
                             await process_media_file(client, chat_id, str(f.path), action, custom_renames, f.index, task_id)
                 shutil.rmtree(dl_dir, ignore_errors=True)
 
@@ -1030,6 +1036,30 @@ async def handle_leech(client, message):
         await status_msg.delete()
     except Exception as e:
         await status_msg.edit_text(f"❌ Error: {e}")
+
+# --- URL COMMAND ---
+async def handle_url(client, message):
+    if len(message.command) < 2:
+        return await message.reply("Please provide a direct URL! Example: <code>/url https://domain.com/video.mkv</code>", parse_mode=enums.ParseMode.HTML)
+    url = message.command[1]
+    
+    file_name = url.split("/")[-1].split("?")[0]
+    if not file_name or len(file_name) < 3: file_name = "downloaded_video.mkv"
+    
+    task_id = str(message.id)
+    current_tasks[task_id] = {
+        "url": url,
+        "t_name": file_name,
+        "user_mention": message.from_user.mention if message.from_user else "User"
+    }
+    
+    await message.reply_text(
+        f"<b>🔗 URL Detected:</b>\n<code>{safe_html(url)}</code>\n\n"
+        "👉 <i>Choose an action from the Encoding Panel below:</i>",
+        reply_markup=get_panel_markup(task_id),
+        parse_mode=enums.ParseMode.HTML,
+        quote=True
+    )
 
 # --- REPLY COMMANDS & FILE SELECTION ---
 async def reply_handler(client, message):
@@ -1229,6 +1259,7 @@ async def main():
             app.add_handler(MessageHandler(help_cmd, filters.command("help")))
             app.add_handler(MessageHandler(panel_cmd, filters.command(["panel", "encode"])))
             app.add_handler(MessageHandler(handle_leech, filters.command("leech")))
+            app.add_handler(MessageHandler(handle_url, filters.command("url")))
             app.add_handler(MessageHandler(cancel_cmd, filters.regex(r"^/cancel")))
             app.add_handler(MessageHandler(handle_telegram_file, (filters.document | filters.video)))
             app.add_handler(MessageHandler(reply_handler, filters.reply))
