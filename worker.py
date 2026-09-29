@@ -39,7 +39,7 @@ try:
 except Exception:
     pass
 
-MASTER_WS_URL = "wss://worker-production-3a0e.up.railway.app"
+MASTER_WS_URL = "wss://worker-production-b25d.up.railway.app"
 TARGET_CHANNEL = "@animedubsinhla"
 WATERMARK = "@animesinhala1"
 
