@@ -38,7 +38,7 @@ user_app = None
 upload_client = None
 aria2_api = None
 
-DOWNLOAD_MAX_RETRIES = 5
+DOWNLOAD_MAX_RETRIES = 8
 UPLOAD_MAX_RETRIES = 5
 
 # Settings & Concurrency
@@ -162,36 +162,81 @@ def safe_html(text): return html.escape(str(text), quote=False)
 def get_mime_type(path): return mimetypes.guess_type(path)[0] or "application/octet-stream"
 
 # --- RETRY HELPERS FOR DOWNLOAD & UPLOAD ---
-async def download_with_retry(client, message, file_name, progress=None, max_retries=DOWNLOAD_MAX_RETRIES):
-    """Download a Telegram file with retry logic for timeout/connection errors."""
+async def download_with_retry(client, message, file_name, chat_id=None, msg_id=None, progress=None, max_retries=DOWNLOAD_MAX_RETRIES):
+    """Download a Telegram file with retry logic.
+    
+    Key fix: On each retry attempt:
+    1. Restart the client session (force new DC connection)
+    2. Re-fetch the message via get_messages() for fresh file_reference
+    3. Wait with exponential backoff for Telegram servers to recover
+    
+    file_reference expires quickly on Telegram. If we keep retrying with the
+    same stale reference, every attempt will fail with -503 Timeout.
+    """
     last_error = None
+    current_msg = message
+    
     for attempt in range(1, max_retries + 1):
         try:
             logger.info(f"Download attempt {attempt}/{max_retries} for {os.path.basename(file_name)}")
             
-            # Ensure client is connected before download
-            if not client.is_connected:
-                logger.warning("Client disconnected, reconnecting...")
+            # On retry (attempt > 1): restart session + re-fetch message for fresh file_reference
+            if attempt > 1:
+                # 1. Restart client to force new DC connection
                 try:
-                    await client.start()
+                    if client.is_connected:
+                        logger.info("Restarting client session for fresh connection...")
+                        await client.restart()
+                    else:
+                        logger.info("Client disconnected, starting fresh...")
+                        await client.start()
+                    logger.info("Client session restarted successfully")
                 except Exception as rc_err:
-                    logger.warning(f"Reconnect attempt failed: {rc_err}")
+                    logger.warning(f"Session restart failed: {rc_err}, trying start()...")
+                    try:
+                        await client.start()
+                    except Exception:
+                        pass
+                
+                # 2. Re-fetch message for fresh file_reference
+                if chat_id and msg_id:
+                    try:
+                        fresh_msg = await client.get_messages(chat_id, msg_id)
+                        if fresh_msg and (fresh_msg.document or fresh_msg.video):
+                            current_msg = fresh_msg
+                            logger.info(f"Re-fetched message {msg_id} with fresh file_reference")
+                        else:
+                            logger.warning(f"Re-fetched message {msg_id} but no media found, using previous reference")
+                    except Exception as gm_err:
+                        logger.warning(f"Failed to re-fetch message: {gm_err}, using previous reference")
+                
+                # 3. Clean up any partial download from previous attempt
+                if os.path.exists(file_name):
+                    with contextlib.suppress(Exception): os.remove(file_name)
+            else:
+                # First attempt: just check connection
+                if not client.is_connected:
+                    logger.warning("Client disconnected, reconnecting...")
+                    try:
+                        await client.start()
+                    except Exception as rc_err:
+                        logger.warning(f"Reconnect failed: {rc_err}")
             
-            path = await client.download_media(message, file_name=file_name, progress=progress)
+            path = await client.download_media(current_msg, file_name=file_name, progress=progress)
             if path and os.path.exists(path):
                 file_size = os.path.getsize(path)
-                expected_size = getattr(message.document or message.video, "file_size", 0)
+                expected_size = getattr(current_msg.document or current_msg.video, "file_size", 0)
                 if expected_size > 0 and file_size < expected_size * 0.95:
-                    logger.warning(f"Downloaded file size ({file_size}) is less than expected ({expected_size}), retrying...")
+                    logger.warning(f"Incomplete download: {file_size} / {expected_size} bytes")
                     with contextlib.suppress(Exception): os.remove(path)
-                    raise Exception(f"Incomplete download: got {file_size} bytes, expected {expected_size}")
-                logger.info(f"Download successful: {path} ({format_bytes(file_size)})")
+                    raise Exception(f"Incomplete download: got {format_bytes(file_size)}, expected {format_bytes(expected_size)}")
+                logger.info(f"✅ Download successful: {path} ({format_bytes(file_size)})")
                 return path
             raise Exception("Download returned None or file does not exist")
         except asyncio.CancelledError:
             raise
         except FloodWait as fw:
-            wait = min(int(getattr(fw, "value", 5)), 60)
+            wait = min(int(getattr(fw, "value", 5)), 120)
             logger.warning(f"FloodWait during download: sleeping {wait}s")
             await asyncio.sleep(wait)
         except Exception as e:
@@ -199,12 +244,10 @@ async def download_with_retry(client, message, file_name, progress=None, max_ret
             logger.warning(f"Download attempt {attempt}/{max_retries} failed: {e}")
             if attempt == max_retries:
                 break
-            wait_time = min(2 ** attempt * 3, 60)
-            logger.info(f"Retrying download in {wait_time}s... (waiting for connection recovery)")
+            # Exponential backoff: 10s, 20s, 40s, 60s...
+            wait_time = min(10 * (2 ** (attempt - 1)), 60)
+            logger.info(f"⏳ Waiting {wait_time}s before retry (fresh session + file_reference)...")
             await asyncio.sleep(wait_time)
-            # Try to clean up partial download
-            if os.path.exists(file_name):
-                with contextlib.suppress(Exception): os.remove(file_name)
     raise Exception(f"Download failed after {max_retries} attempts. Last error: {last_error}")
 
 async def upload_with_retry(client, chat_id, f_path, f_name, thumb, progress=None, max_retries=UPLOAD_MAX_RETRIES):
@@ -753,7 +796,11 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                     ACTIVE_TASKS[task_id]["eta"] = (total - current) / ACTIVE_TASKS[task_id]["speed"] if ACTIVE_TASKS[task_id]["speed"] > 0 else 0
 
                 try:
-                    path = await download_with_retry(client, media_msg, file_name=path, progress=tg_progress)
+                    path = await download_with_retry(
+                        client, media_msg, file_name=path,
+                        chat_id=chat_id, msg_id=int(task_id),
+                        progress=tg_progress
+                    )
                 except Exception as dl_err:
                     logger.error(f"Download failed for task {task_id}: {dl_err}")
                     with contextlib.suppress(Exception):
