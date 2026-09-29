@@ -38,6 +38,9 @@ user_app = None
 upload_client = None
 aria2_api = None
 
+DOWNLOAD_MAX_RETRIES = 5
+UPLOAD_MAX_RETRIES = 5
+
 # Settings & Concurrency
 CONCURRENCY_LIMIT = 4
 TASK_SEMAPHORE = asyncio.Semaphore(CONCURRENCY_LIMIT)
@@ -157,6 +160,73 @@ def make_progress_bar(percentage):
 def safe_html(text): return html.escape(str(text), quote=False)
 
 def get_mime_type(path): return mimetypes.guess_type(path)[0] or "application/octet-stream"
+
+# --- RETRY HELPERS FOR DOWNLOAD & UPLOAD ---
+async def download_with_retry(client, message, file_name, progress=None, max_retries=DOWNLOAD_MAX_RETRIES):
+    """Download a Telegram file with retry logic for timeout/connection errors."""
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"Download attempt {attempt}/{max_retries} for {os.path.basename(file_name)}")
+            path = await client.download_media(message, file_name=file_name, progress=progress)
+            if path and os.path.exists(path):
+                file_size = os.path.getsize(path)
+                expected_size = getattr(message.document or message.video, "file_size", 0)
+                if expected_size > 0 and file_size < expected_size * 0.95:
+                    logger.warning(f"Downloaded file size ({file_size}) is less than expected ({expected_size}), retrying...")
+                    os.remove(path)
+                    raise Exception(f"Incomplete download: got {file_size} bytes, expected {expected_size}")
+                logger.info(f"Download successful: {path} ({format_bytes(file_size)})")
+                return path
+            raise Exception("Download returned None or file does not exist")
+        except asyncio.CancelledError:
+            raise
+        except FloodWait as fw:
+            wait = min(int(getattr(fw, "value", 5)), 60)
+            logger.warning(f"FloodWait during download: sleeping {wait}s")
+            await asyncio.sleep(wait)
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Download attempt {attempt}/{max_retries} failed: {e}")
+            if attempt == max_retries:
+                break
+            wait_time = min(2 ** attempt * 3, 60)
+            logger.info(f"Retrying download in {wait_time}s...")
+            await asyncio.sleep(wait_time)
+    raise Exception(f"Download failed after {max_retries} attempts. Last error: {last_error}")
+
+async def upload_with_retry(client, chat_id, f_path, f_name, thumb, progress=None, max_retries=UPLOAD_MAX_RETRIES):
+    """Upload a file to Telegram with retry logic."""
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"Upload attempt {attempt}/{max_retries} for {f_name}")
+            msg = await client.send_document(
+                chat_id=chat_id,
+                document=f_path,
+                thumb=thumb,
+                caption=f"<code>{f_name}</code>",
+                force_document=True,
+                progress=progress
+            )
+            logger.info(f"Upload successful: {f_name}")
+            return msg
+        except asyncio.CancelledError:
+            raise
+        except FloodWait as fw:
+            wait = min(int(getattr(fw, "value", 5)), 60)
+            logger.warning(f"FloodWait during upload: sleeping {wait}s")
+            await asyncio.sleep(wait)
+            # Don't count FloodWait as a failed attempt
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Upload attempt {attempt}/{max_retries} failed: {e}")
+            if attempt == max_retries:
+                break
+            wait_time = min(2 ** attempt * 3, 60)
+            logger.info(f"Retrying upload in {wait_time}s...")
+            await asyncio.sleep(wait_time)
+    raise Exception(f"Upload failed after {max_retries} attempts. Last error: {last_error}")
 
 def parse_selection(selection_str, max_idx):
     if selection_str.lower() == "all": return list(range(1, max_idx + 1))
@@ -599,14 +669,7 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
 
         try:
             thumb = CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None
-            msg = await client.send_document(
-                chat_id=chat_id,
-                document=f_path,
-                thumb=thumb,
-                caption=f"<code>{f_name}</code>",
-                force_document=True,
-                progress=upload_progress
-            )
+            msg = await upload_with_retry(client, chat_id, f_path, f_name, thumb, progress=upload_progress)
             
             # Automatically copy to Database Channel
             if str(chat_id).lower() != TARGET_CHANNEL.lower() and msg:
@@ -629,7 +692,15 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f"Upload error: {e}")
+            logger.error(f"Upload error for {f_name}: {e}")
+            with contextlib.suppress(Exception):
+                await client.send_message(
+                    chat_id,
+                    f"❌ <b>Upload Failed:</b> <code>{safe_html(f_name)}</code>\n"
+                    f"Error: <code>{safe_html(str(e)[:200])}</code>\n"
+                    f"🔄 Try sending the file again.",
+                    parse_mode=enums.ParseMode.HTML
+                )
 
 # --- EXECUTE TASK WORKER WITH SEMAPHORE ---
 async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, is_telegram_file=False, sub_path=None, audio_path=None, custom_renames=None):
@@ -669,7 +740,38 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                     ACTIVE_TASKS[task_id]["speed"] = current / elapsed
                     ACTIVE_TASKS[task_id]["eta"] = (total - current) / ACTIVE_TASKS[task_id]["speed"] if ACTIVE_TASKS[task_id]["speed"] > 0 else 0
 
-                path = await client.download_media(media_msg, file_name=path, progress=tg_progress)
+                try:
+                    path = await download_with_retry(client, media_msg, file_name=path, progress=tg_progress)
+                except Exception as dl_err:
+                    logger.error(f"Download failed for task {task_id}: {dl_err}")
+                    with contextlib.suppress(Exception):
+                        await client.send_message(
+                            chat_id,
+                            f"❌ <b>Download Failed:</b> <code>{safe_html(file_name)}</code>\n"
+                            f"Error: <code>{safe_html(str(dl_err)[:200])}</code>\n\n"
+                            f"💡 <i>Possible reasons:</i>\n"
+                            f"• Telegram server timeout (large file)\n"
+                            f"• Colab network issue\n"
+                            f"• File too large for current session\n\n"
+                            f"🔄 <b>Try again or use a smaller file.</b>",
+                            parse_mode=enums.ParseMode.HTML
+                        )
+                    shutil.rmtree(dl_dir, ignore_errors=True)
+                    return
+                
+                if not path or not os.path.exists(path):
+                    logger.error(f"Downloaded file not found for task {task_id}")
+                    with contextlib.suppress(Exception):
+                        await client.send_message(
+                            chat_id,
+                            f"❌ <b>Download Error:</b> File <code>{safe_html(file_name)}</code> was not saved properly.\n"
+                            f"🔄 <b>Please try again.</b>",
+                            parse_mode=enums.ParseMode.HTML
+                        )
+                    shutil.rmtree(dl_dir, ignore_errors=True)
+                    return
+                
+                logger.info(f"File downloaded successfully: {path} ({format_bytes(os.path.getsize(path))})")
                 await process_media_file(client, chat_id, path, action, custom_renames, 1, task_id, sub_path, audio_path)
                 shutil.rmtree(dl_dir, ignore_errors=True)
 
@@ -720,8 +822,16 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
 
         except asyncio.CancelledError:
             logger.info(f"Task {task_id} was cancelled.")
+            with contextlib.suppress(Exception):
+                await client.send_message(chat_id, f"🛑 <b>Task cancelled.</b>", parse_mode=enums.ParseMode.HTML)
         except Exception as e:
             logger.error(f"Task {task_id} error: {e}")
+            with contextlib.suppress(Exception):
+                await client.send_message(
+                    chat_id,
+                    f"❌ <b>Task Error:</b>\n<code>{safe_html(str(e)[:300])}</code>\n\n🔄 <b>Please try again.</b>",
+                    parse_mode=enums.ParseMode.HTML
+                )
         finally:
             ACTIVE_TASKS.pop(task_id, None)
             cancel_flags.pop(task_id, None)
