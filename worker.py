@@ -868,7 +868,7 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                 logger.info(f"File downloaded successfully: {path} ({format_bytes(os.path.getsize(path))})")
                 if action == "enhance4k":
                     status_msg = await client.send_message(chat_id, "🔮 <b>Starting 4K Enhancement...</b>", parse_mode=enums.ParseMode.HTML)
-                    final_4k = await process_4k_enhancement(client, path, status_msg)
+                    final_4k = await process_4k_enhancement(client, path, status_msg, task_id)
                     if final_4k and os.path.exists(final_4k):
                         file_size = os.path.getsize(final_4k)
                         if file_size > MAX_FILE_SIZE:
@@ -939,7 +939,7 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                             if action == "enhance4k":
                                 # 4K Enhancement Pipeline
                                 status_msg = await client.send_message(chat_id, "🔮 <b>Starting 4K Enhancement...</b>", parse_mode=enums.ParseMode.HTML)
-                                final_4k = await process_4k_enhancement(client, str(f.path), status_msg)
+                                final_4k = await process_4k_enhancement(client, str(f.path), status_msg, task_id)
                                 if final_4k and os.path.exists(final_4k):
                                     file_size = os.path.getsize(final_4k)
                                     if file_size > MAX_FILE_SIZE:
