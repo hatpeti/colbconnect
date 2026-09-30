@@ -583,6 +583,7 @@ def get_panel_markup(task_id):
         [btn("480p", f"panel_480_{task_id}", style=enums.ButtonStyle.PRIMARY),
          btn("720p", f"panel_720_{task_id}", style=enums.ButtonStyle.PRIMARY),
          btn("1080p", f"panel_1080_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+        [btn("🔮 4K Enhance", f"panel_enhance4k_{task_id}", style=enums.ButtonStyle.SUCCESS)],
         [btn("✂️ Remove Sub", f"panel_removesub_{task_id}", style=enums.ButtonStyle.DEFAULT),
          btn("📝 Add Sub", f"panel_addsub_{task_id}", style=enums.ButtonStyle.DEFAULT),
          btn("🔍 Extract Sub", f"panel_extract_sub_{task_id}", style=enums.ButtonStyle.DEFAULT)],
@@ -865,7 +866,26 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                     return
                 
                 logger.info(f"File downloaded successfully: {path} ({format_bytes(os.path.getsize(path))})")
-                await process_media_file(client, chat_id, path, action, custom_renames, 1, task_id, sub_path, audio_path)
+                if action == "enhance4k":
+                    status_msg = await client.send_message(chat_id, "🔮 <b>Starting 4K Enhancement...</b>", parse_mode=enums.ParseMode.HTML)
+                    final_4k = await process_4k_enhancement(client, path, status_msg)
+                    if final_4k and os.path.exists(final_4k):
+                        file_size = os.path.getsize(final_4k)
+                        if file_size > MAX_FILE_SIZE:
+                            await client.send_document(chat_id=PRIVATE_DB_CHANNEL, document=final_4k,
+                                caption=f"🎬 4K FINAL | {os.path.basename(final_4k)}\n#FINAL", force_document=True)
+                            await status_msg.edit_text("✅ <b>Done!</b> Final 4K video saved to DB Channel (too large for chat).")
+                        else:
+                            thumb = CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None
+                            await client.send_document(
+                                chat_id=chat_id, document=final_4k,
+                                caption=f"🎬 <b>{os.path.basename(final_4k)} — 4K Enhanced</b>\n10-bit HEVC x265 | Real-ESRGAN\n{WATERMARK}",
+                                parse_mode=enums.ParseMode.HTML, thumb=thumb, force_document=True
+                            )
+                            await status_msg.edit_text("✅ <b>4K Enhancement Complete!</b> 🎉", parse_mode=enums.ParseMode.HTML)
+                        if os.path.exists(final_4k): os.remove(final_4k)
+                else:
+                    await process_media_file(client, chat_id, path, action, custom_renames, 1, task_id, sub_path, audio_path)
                 shutil.rmtree(dl_dir, ignore_errors=True)
 
             elif not is_telegram_file and task_id in current_tasks:
@@ -916,7 +936,27 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                 if not cancel_flags.get(task_id):
                     for f in dl.files:
                         if (getattr(f, "selected", False) or "url" in t_data) and os.path.exists(str(f.path)):
-                            await process_media_file(client, chat_id, str(f.path), action, custom_renames, f.index, task_id)
+                            if action == "enhance4k":
+                                # 4K Enhancement Pipeline
+                                status_msg = await client.send_message(chat_id, "🔮 <b>Starting 4K Enhancement...</b>", parse_mode=enums.ParseMode.HTML)
+                                final_4k = await process_4k_enhancement(client, str(f.path), status_msg)
+                                if final_4k and os.path.exists(final_4k):
+                                    file_size = os.path.getsize(final_4k)
+                                    if file_size > MAX_FILE_SIZE:
+                                        await client.send_document(chat_id=PRIVATE_DB_CHANNEL, document=final_4k,
+                                            caption=f"🎬 4K FINAL | {os.path.basename(final_4k)}\n#FINAL", force_document=True)
+                                        await status_msg.edit_text("✅ <b>Done!</b> Final 4K video saved to DB Channel (too large for chat).")
+                                    else:
+                                        thumb = CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None
+                                        await client.send_document(
+                                            chat_id=chat_id, document=final_4k,
+                                            caption=f"🎬 <b>{os.path.basename(final_4k)} — 4K Enhanced</b>\n10-bit HEVC x265 | Real-ESRGAN\n{WATERMARK}",
+                                            parse_mode=enums.ParseMode.HTML, thumb=thumb, force_document=True
+                                        )
+                                        await status_msg.edit_text("✅ <b>4K Enhancement Complete!</b> 🎉", parse_mode=enums.ParseMode.HTML)
+                                    if os.path.exists(final_4k): os.remove(final_4k)
+                            else:
+                                await process_media_file(client, chat_id, str(f.path), action, custom_renames, f.index, task_id)
                 shutil.rmtree(dl_dir, ignore_errors=True)
 
         except asyncio.CancelledError:
@@ -1148,7 +1188,7 @@ async def reply_handler(client, message):
                 prompt = await message.reply("🎵 <b>Please reply to THIS message with your audio file (.aac, .m4a, .mp3, etc.)</b>", parse_mode=enums.ParseMode.HTML)
                 pending_audio_replies[str(prompt.id)] = message.reply_to_message
                 return
-            elif action in ["480", "720", "1080", "reencode", "removesub", "extract_sub", "extract_audio", "remaudio", "extract_thumb"]:
+            elif action in ["480", "720", "1080", "reencode", "removesub", "extract_sub", "extract_audio", "remaudio", "extract_thumb", "enhance4k"]:
                 task_id = str(message.id)
                 asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, action, media_msg=message.reply_to_message, is_telegram_file=True))
 
