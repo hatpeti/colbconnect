@@ -1305,7 +1305,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path):
     code, out, err = await _run_shell(cmd)
     if code != 0:
         logger.error(f"Real-ESRGAN failed for {input_path}:\nSTDOUT: {out}\nSTDERR: {err}")
-    return code == 0 and os.path.exists(output_path)
+    return code == 0 and os.path.exists(output_path), err
 
 async def _encode_hevc_10bit(input_path, output_path):
     """FFmpeg: Re-encode to 10-bit HEVC x265"""
@@ -1397,9 +1397,10 @@ async def process_4k_enhancement(client, input_video_path, status_msg):
             except Exception as e:
                 logger.error(f"Failed to download chunk {i} from DB: {e}")
                 await status_msg.edit_text(f"⚠️ DB download failed for chunk {i+1}, re-processing...")
-                success = await _upscale_chunk_realesrgan(raw_chunk, out_path)
+                success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path)
                 if not success:
-                    await status_msg.edit_text(f"❌ Upscaling failed at chunk {i+1}.")
+                    err_snippet = safe_html(str(err_msg)[-800:]) if err_msg else "Unknown Error"
+                    await status_msg.edit_text(f"❌ Upscaling failed at chunk {i+1}.\n\n<b>Error details:</b>\n<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
                     return None
             final_chunks.append(out_path)
             continue
@@ -1411,9 +1412,10 @@ async def process_4k_enhancement(client, input_video_path, status_msg):
             parse_mode=enums.ParseMode.HTML
         )
         
-        success = await _upscale_chunk_realesrgan(raw_chunk, out_path)
+        success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path)
         if not success:
-            await status_msg.edit_text(f"❌ Real-ESRGAN failed on chunk {i+1}/{total}.")
+            err_snippet = safe_html(str(err_msg)[-800:]) if err_msg else "Unknown Error"
+            await status_msg.edit_text(f"❌ Real-ESRGAN failed on chunk {i+1}/{total}.\n\n<b>Error details:</b>\n<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
             return None
         
         await status_msg.edit_text(
