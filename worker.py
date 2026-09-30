@@ -1348,6 +1348,112 @@ async def _find_completed_chunks(client, job_tag):
         logger.warning(f"Resume search failed: {e}")
     return completed
 
+async def process_4k_enhancement(client, input_video_path, status_msg):
+    """Main 4K pipeline: split → resume check → upscale → merge → encode"""
+    basename = os.path.splitext(os.path.basename(input_video_path))[0]
+    job_tag = basename.replace(" ", "_").replace(".", "_").replace("-", "_")
+    
+    work_dir = f"/content/4k_work_{job_tag}"
+    raw_dir = os.path.join(work_dir, "raw_chunks")
+    upscaled_dir = os.path.join(work_dir, "4k_chunks")
+    os.makedirs(raw_dir, exist_ok=True)
+    os.makedirs(upscaled_dir, exist_ok=True)
+    
+    # Step 1: Split
+    await status_msg.edit_text("✂️ <b>Step 1/4:</b> Splitting video into 3-min chunks...", parse_mode=enums.ParseMode.HTML)
+    raw_chunks = await _split_video_to_chunks(input_video_path, raw_dir, segment_seconds=180)
+    total = len(raw_chunks)
+    if total == 0:
+        await status_msg.edit_text("❌ FFmpeg split failed - no chunks created.")
+        return None
+    
+    await status_msg.edit_text(f"✂️ Split into <b>{total}</b> chunks.", parse_mode=enums.ParseMode.HTML)
+    
+    # Step 2: Resume check
+    await status_msg.edit_text("🔍 <b>Step 2/4:</b> Checking DB Channel for previous progress...", parse_mode=enums.ParseMode.HTML)
+    existing = await _find_completed_chunks(client, job_tag)
+    skipped = 0
+    
+    # Step 3: Upscale each chunk
+    final_chunks = []
+    for i, raw_chunk in enumerate(raw_chunks):
+        chunk_tag = f"#{job_tag}_Chunk_{i:03d}"
+        out_name = os.path.basename(raw_chunk).replace(".mp4", "_4k.mp4")
+        out_path = os.path.join(upscaled_dir, out_name)
+        
+        if chunk_tag in existing:
+            skipped += 1
+            await status_msg.edit_text(
+                f"⏩ <b>Chunk {i+1}/{total}</b> — already in DB! Downloading back...\n"
+                f"(Skipped: {skipped} | Remaining: {total - i - 1})",
+                parse_mode=enums.ParseMode.HTML
+            )
+            try:
+                await client.download_media(existing[chunk_tag], file_name=out_path)
+            except Exception as e:
+                logger.error(f"Failed to download chunk {i} from DB: {e}")
+                await status_msg.edit_text(f"⚠️ DB download failed for chunk {i+1}, re-processing...")
+                success = await _upscale_chunk_realesrgan(raw_chunk, out_path)
+                if not success:
+                    await status_msg.edit_text(f"❌ Upscaling failed at chunk {i+1}.")
+                    return None
+            final_chunks.append(out_path)
+            continue
+        
+        await status_msg.edit_text(
+            f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\n"
+            f"⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\n\n"
+            f"<i>This may take 15-40 min per chunk depending on GPU.</i>",
+            parse_mode=enums.ParseMode.HTML
+        )
+        
+        success = await _upscale_chunk_realesrgan(raw_chunk, out_path)
+        if not success:
+            await status_msg.edit_text(f"❌ Real-ESRGAN failed on chunk {i+1}/{total}.")
+            return None
+        
+        await status_msg.edit_text(
+            f"☁️ <b>Auto-saving Chunk {i+1}/{total}</b> to DB Channel...",
+            parse_mode=enums.ParseMode.HTML
+        )
+        try:
+            await client.send_document(
+                chat_id=PRIVATE_DB_CHANNEL,
+                document=out_path,
+                caption=f"🎬 4K Chunk | {basename}\n{chunk_tag}\n#{job_tag}",
+                force_document=True
+            )
+        except Exception as e:
+            logger.error(f"Failed to upload chunk {i} to DB channel: {e}")
+        
+        final_chunks.append(out_path)
+    
+    # Step 4: Merge
+    await status_msg.edit_text(
+        f"🔄 <b>Step 4/4:</b> Merging {total} chunks into final 4K video...",
+        parse_mode=enums.ParseMode.HTML
+    )
+    
+    merged_path = f"/content/{basename}_4K.mp4"
+    merge_ok = await _merge_chunks(final_chunks, merged_path)
+    if not merge_ok:
+        await status_msg.edit_text("❌ Failed to merge chunks.")
+        return None
+    
+    # Encode to 10-bit HEVC x265
+    await status_msg.edit_text("🎬 <b>Encoding to 10-bit HEVC x265...</b>", parse_mode=enums.ParseMode.HTML)
+    hevc_path = f"/content/{basename}_4K_HEVC.mkv"
+    hevc_ok = await _encode_hevc_10bit(merged_path, hevc_path)
+    
+    final_output = hevc_path if hevc_ok else merged_path
+    
+    # Cleanup work dir
+    shutil.rmtree(work_dir, ignore_errors=True)
+    if hevc_ok and os.path.exists(merged_path):
+        os.remove(merged_path)
+    
+    return final_output
+
 async def handle_enhance(client, message):
     """Handler for /enhance command - 4K upscale with auto-resume"""
     # Get the video to enhance
