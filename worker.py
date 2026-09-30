@@ -42,6 +42,7 @@ except Exception:
 MASTER_WS_URL = "wss://worker-production-d47f.up.railway.app"
 TARGET_CHANNEL = "@animedubsinhla"
 WATERMARK = "@animesinhala1"
+PRIVATE_DB_CHANNEL = -1004327562659  # Private Channel for 4K chunk auto-save/resume
 
 app = None
 user_app = None
@@ -1223,11 +1224,270 @@ async def cancel_cmd(client, message):
     else:
         await message.reply("❌ Task not found or already finished.")
 
+# ============================================================
+# --- 4K REAL-ESRGAN ENHANCEMENT SYSTEM (Auto-Resume) ---
+# ============================================================
+
+async def _run_shell(cmd):
+    """Run a shell command asynchronously"""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+    return proc.returncode, stdout.decode(errors='ignore'), stderr.decode(errors='ignore')
+
+async def _split_video_to_chunks(input_video, output_dir, segment_seconds=180):
+    """FFmpeg: Split video into N-second segments"""
+    os.makedirs(output_dir, exist_ok=True)
+    basename = os.path.splitext(os.path.basename(input_video))[0]
+    pattern = os.path.join(output_dir, f"{basename}_chunk_%03d.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-i", input_video,
+        "-c", "copy", "-f", "segment",
+        "-segment_time", str(segment_seconds),
+        "-reset_timestamps", "1", pattern
+    ]
+    await _run_shell(cmd)
+    return sorted(glob.glob(os.path.join(output_dir, f"{basename}_chunk_*.mp4")))
+
+async def _upscale_chunk_realesrgan(input_path, output_path):
+    """Run Real-ESRGAN inference on a single chunk"""
+    cmd = [
+        "python", "/content/Real-ESRGAN/inference_realesrgan_video.py",
+        "-n", "RealESRGAN_x4plus_anime_6B",
+        "-i", input_path,
+        "-o", output_path,
+        "--outscale", "4",
+        "--half"
+    ]
+    code, out, err = await _run_shell(cmd)
+    return code == 0 and os.path.exists(output_path)
+
+async def _encode_hevc_10bit(input_path, output_path):
+    """FFmpeg: Re-encode to 10-bit HEVC x265"""
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-c:v", "libx265", "-preset", "medium",
+        "-x265-params", "profile=main10",
+        "-pix_fmt", "yuv420p10le",
+        "-crf", "18",
+        "-c:a", "copy",
+        output_path
+    ]
+    code, _, _ = await _run_shell(cmd)
+    return code == 0 and os.path.exists(output_path)
+
+async def _merge_chunks(chunk_files, output_path):
+    """FFmpeg: Merge multiple video chunks back into one file"""
+    list_file = "/content/_merge_list.txt"
+    with open(list_file, "w") as f:
+        for c in chunk_files:
+            f.write(f"file '{os.path.abspath(c)}'\n")
+    cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", list_file, "-c", "copy", output_path
+    ]
+    code, _, _ = await _run_shell(cmd)
+    if os.path.exists(list_file): os.remove(list_file)
+    return code == 0 and os.path.exists(output_path)
+
+async def _find_completed_chunks(client, job_tag):
+    """Search Private DB Channel for already-completed chunks (Resume)"""
+    completed = {}
+    try:
+        async for msg in client.search_messages(chat_id=PRIVATE_DB_CHANNEL, query=job_tag):
+            if msg.document or msg.video:
+                caption = msg.caption or ""
+                for line in caption.split("\n"):
+                    line = line.strip()
+                    if line.startswith("#") and "_Chunk_" in line:
+                        completed[line] = msg
+    except Exception as e:
+        logger.warning(f"Resume search failed: {e}")
+    return completed
+
+async def handle_enhance(client, message):
+    """Handler for /enhance command - 4K upscale with auto-resume"""
+    # Get the video to enhance
+    video_path = None
+    
+    # Case 1: /enhance as reply to a video/document
+    if message.reply_to_message and (message.reply_to_message.video or message.reply_to_message.document):
+        status = await message.reply("⬇️ <b>Downloading video from Telegram...</b>", parse_mode=enums.ParseMode.HTML)
+        try:
+            video_path = await client.download_media(message.reply_to_message, file_name="/content/enhance_input/")
+        except Exception as e:
+            return await status.edit_text(f"❌ Download failed: {e}")
+    
+    # Case 2: /enhance <magnet_or_url>
+    elif len(message.command) >= 2:
+        link = message.command[1]
+        status = await message.reply("⬇️ <b>Downloading via Aria2c...</b>", parse_mode=enums.ParseMode.HTML)
+        try:
+            global aria2_api
+            dl = aria2_api.add_uris([link], options={"dir": "/content/enhance_input"})
+            while not dl.is_complete:
+                await asyncio.sleep(3)
+                dl.update()
+                if dl.status == "error":
+                    return await status.edit_text(f"❌ Download error: {dl.error_message}")
+                pct = dl.progress_string()
+                speed = dl.download_speed_string()
+                await status.edit_text(f"⬇️ Downloading... {pct} | {speed}", parse_mode=enums.ParseMode.HTML)
+            video_path = dl.files[0].path if dl.files else None
+        except Exception as e:
+            return await status.edit_text(f"❌ Download failed: {e}")
+    else:
+        return await message.reply(
+            "📖 <b>4K Enhance - Usage:</b>\n\n"
+            "• Reply to a video: <code>/enhance</code>\n"
+            "• Direct link/magnet: <code>/enhance &lt;url_or_magnet&gt;</code>\n\n"
+            "Bot will split → upscale 4K → auto-save to DB channel → merge & send.",
+            parse_mode=enums.ParseMode.HTML
+        )
+    
+    if not video_path or not os.path.exists(video_path):
+        return await status.edit_text("❌ No video file found after download.")
+    
+    # --- Begin 4K Enhancement Pipeline ---
+    basename = os.path.splitext(os.path.basename(video_path))[0]
+    job_tag = basename.replace(" ", "_").replace(".", "_").replace("-", "_")
+    
+    work_dir = f"/content/4k_work_{job_tag}"
+    raw_dir = os.path.join(work_dir, "raw_chunks")
+    upscaled_dir = os.path.join(work_dir, "4k_chunks")
+    os.makedirs(raw_dir, exist_ok=True)
+    os.makedirs(upscaled_dir, exist_ok=True)
+    
+    # Step 1: Split
+    await status.edit_text("✂️ <b>Step 1/4:</b> Splitting video into 3-min chunks...", parse_mode=enums.ParseMode.HTML)
+    raw_chunks = await _split_video_to_chunks(video_path, raw_dir, segment_seconds=180)
+    total = len(raw_chunks)
+    if total == 0:
+        return await status.edit_text("❌ FFmpeg split failed - no chunks created.")
+    
+    await status.edit_text(f"✂️ Split into <b>{total}</b> chunks.", parse_mode=enums.ParseMode.HTML)
+    
+    # Step 2: Resume check
+    await status.edit_text("🔍 <b>Step 2/4:</b> Checking DB Channel for previous progress...", parse_mode=enums.ParseMode.HTML)
+    existing = await _find_completed_chunks(client, job_tag)
+    skipped = 0
+    
+    # Step 3: Upscale each chunk
+    final_chunks = []
+    for i, raw_chunk in enumerate(raw_chunks):
+        chunk_tag = f"#{job_tag}_Chunk_{i:03d}"
+        out_name = os.path.basename(raw_chunk).replace(".mp4", "_4k.mp4")
+        out_path = os.path.join(upscaled_dir, out_name)
+        
+        # Check if this chunk was already done in a previous session
+        if chunk_tag in existing:
+            skipped += 1
+            await status.edit_text(
+                f"⏩ <b>Chunk {i+1}/{total}</b> — already in DB! Downloading back...\n"
+                f"(Skipped: {skipped} | Remaining: {total - i - 1})",
+                parse_mode=enums.ParseMode.HTML
+            )
+            try:
+                await client.download_media(existing[chunk_tag], file_name=out_path)
+            except Exception as e:
+                logger.error(f"Failed to download chunk {i} from DB: {e}")
+                # If download fails, re-process it
+                await status.edit_text(f"⚠️ DB download failed for chunk {i+1}, re-processing...")
+                success = await _upscale_chunk_realesrgan(raw_chunk, out_path)
+                if not success:
+                    return await status.edit_text(f"❌ Upscaling failed at chunk {i+1}.")
+            final_chunks.append(out_path)
+            continue
+        
+        # Process this chunk fresh
+        await status.edit_text(
+            f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\n"
+            f"⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\n\n"
+            f"<i>This may take 15-40 min per chunk depending on GPU.</i>",
+            parse_mode=enums.ParseMode.HTML
+        )
+        
+        success = await _upscale_chunk_realesrgan(raw_chunk, out_path)
+        if not success:
+            return await status.edit_text(f"❌ Real-ESRGAN failed on chunk {i+1}/{total}.")
+        
+        # Upload completed chunk to Private DB Channel (auto-save)
+        await status.edit_text(
+            f"☁️ <b>Auto-saving Chunk {i+1}/{total}</b> to DB Channel...",
+            parse_mode=enums.ParseMode.HTML
+        )
+        try:
+            await client.send_document(
+                chat_id=PRIVATE_DB_CHANNEL,
+                document=out_path,
+                caption=f"🎬 4K Chunk | {basename}\n{chunk_tag}\n#{job_tag}",
+                force_document=True
+            )
+        except Exception as e:
+            logger.error(f"Failed to upload chunk {i} to DB channel: {e}")
+            # Don't abort - we still have the local file
+        
+        final_chunks.append(out_path)
+    
+    # Step 4: Merge all 4K chunks
+    await status.edit_text(
+        f"🔄 <b>Step 4/4:</b> Merging {total} chunks into final 4K video...",
+        parse_mode=enums.ParseMode.HTML
+    )
+    
+    merged_path = f"/content/{basename}_4K.mp4"
+    merge_ok = await _merge_chunks(final_chunks, merged_path)
+    if not merge_ok:
+        return await status.edit_text("❌ Failed to merge chunks.")
+    
+    # Optional: Encode to 10-bit HEVC x265
+    await status.edit_text("🎬 <b>Encoding to 10-bit HEVC x265...</b>", parse_mode=enums.ParseMode.HTML)
+    hevc_path = f"/content/{basename}_4K_HEVC.mkv"
+    hevc_ok = await _encode_hevc_10bit(merged_path, hevc_path)
+    
+    final_output = hevc_path if hevc_ok else merged_path
+    
+    # Upload final video to user
+    await status.edit_text("📤 <b>Uploading final 4K video...</b>", parse_mode=enums.ParseMode.HTML)
+    try:
+        file_size = os.path.getsize(final_output)
+        if file_size > MAX_FILE_SIZE:
+            await status.edit_text(
+                f"⚠️ Final video is {file_size // (1024*1024)} MB (over 2GB limit).\n"
+                f"Uploading to DB Channel instead...",
+                parse_mode=enums.ParseMode.HTML
+            )
+            await client.send_document(chat_id=PRIVATE_DB_CHANNEL, document=final_output,
+                caption=f"🎬 4K FINAL | {basename}\n#{job_tag}_FINAL", force_document=True)
+            await status.edit_text("✅ <b>Done!</b> Final 4K video saved to DB Channel (too large for chat).")
+        else:
+            thumb = CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None
+            await client.send_document(
+                chat_id=message.chat.id,
+                document=final_output,
+                caption=f"🎬 <b>{basename} — 4K Enhanced</b>\n10-bit HEVC x265 | Real-ESRGAN\n{WATERMARK}",
+                parse_mode=enums.ParseMode.HTML,
+                thumb=thumb,
+                force_document=True
+            )
+            await status.edit_text("✅ <b>4K Enhancement Complete!</b> 🎉")
+    except Exception as e:
+        await status.edit_text(f"❌ Upload failed: {e}")
+    
+    # Cleanup
+    shutil.rmtree(work_dir, ignore_errors=True)
+    for f in [merged_path, hevc_path]:
+        if os.path.exists(f): os.remove(f)
+
 # --- START COMMAND ---
 async def start_cmd(client, message):
     await message.reply(
         "⚡ <b>Colab Worker 3.0 is Online & Ready!</b>\n\n"
         "• Use <code>/leech &lt;magnet_link&gt;</code> to download torrents.\n"
+        "• Use <code>/enhance</code> (reply to video) or <code>/enhance &lt;url&gt;</code> for <b>4K Upscaling</b>.\n"
         "• Send or reply to any video to open the <b>Encoding Panel</b>.\n"
         "• Use <code>/help</code> for commands list (සිංහල).",
         parse_mode=enums.ParseMode.HTML
@@ -1269,6 +1529,7 @@ async def main():
             app.add_handler(MessageHandler(help_cmd, filters.command("help")))
             app.add_handler(MessageHandler(panel_cmd, filters.command(["panel", "encode"])))
             app.add_handler(MessageHandler(handle_leech, filters.command("leech")))
+            app.add_handler(MessageHandler(handle_enhance, filters.command("enhance")))
             app.add_handler(MessageHandler(handle_url, filters.command("url")))
             app.add_handler(MessageHandler(cancel_cmd, filters.regex(r"^/cancel")))
             app.add_handler(MessageHandler(handle_telegram_file, (filters.document | filters.video)))
