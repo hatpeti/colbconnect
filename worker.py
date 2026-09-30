@@ -1300,7 +1300,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path):
         "-i", input_path,
         "-o", output_path,
         "--outscale", "4",
-        "--half"
+        
     ]
     code, out, err = await _run_shell(cmd)
     if code != 0:
