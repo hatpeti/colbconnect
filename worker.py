@@ -1303,6 +1303,8 @@ async def _upscale_chunk_realesrgan(input_path, output_path):
         "--half"
     ]
     code, out, err = await _run_shell(cmd)
+    if code != 0:
+        logger.error(f"Real-ESRGAN failed for {input_path}:\nSTDOUT: {out}\nSTDERR: {err}")
     return code == 0 and os.path.exists(output_path)
 
 async def _encode_hevc_10bit(input_path, output_path):
@@ -1337,13 +1339,15 @@ async def _find_completed_chunks(client, job_tag):
     """Search Private DB Channel for already-completed chunks (Resume)"""
     completed = {}
     try:
-        async for msg in client.search_messages(chat_id=PRIVATE_DB_CHANNEL, query=job_tag):
+        # Bots can't use search_messages, so we scan the last 200 messages in the DB channel
+        async for msg in client.get_chat_history(chat_id=PRIVATE_DB_CHANNEL, limit=200):
             if msg.document or msg.video:
                 caption = msg.caption or ""
-                for line in caption.split("\n"):
-                    line = line.strip()
-                    if line.startswith("#") and "_Chunk_" in line:
-                        completed[line] = msg
+                if job_tag in caption:
+                    for line in caption.split("\n"):
+                        line = line.strip()
+                        if line.startswith("#") and "_Chunk_" in line:
+                            completed[line] = msg
     except Exception as e:
         logger.warning(f"Resume search failed: {e}")
     return completed
