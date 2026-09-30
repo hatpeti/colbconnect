@@ -1323,20 +1323,62 @@ async def handle_enhance(client, message):
     
     # Case 2: /enhance <magnet_or_url>
     elif len(message.command) >= 2:
-        link = message.command[1]
-        status = await message.reply("⬇️ <b>Downloading via Aria2c...</b>", parse_mode=enums.ParseMode.HTML)
+        link = " ".join(message.command[1:])  # Support links with spaces
+        dl_dir = "/content/enhance_input"
+        os.makedirs(dl_dir, exist_ok=True)
+        status = await message.reply("⬇️ <b>Downloading...</b>", parse_mode=enums.ParseMode.HTML)
+        
         try:
-            global aria2_api
-            dl = aria2_api.add_uris([link], options={"dir": "/content/enhance_input"})
-            while not dl.is_complete:
-                await asyncio.sleep(3)
-                dl.update()
-                if dl.status == "error":
-                    return await status.edit_text(f"❌ Download error: {dl.error_message}")
-                pct = dl.progress_string()
-                speed = dl.download_speed_string()
-                await status.edit_text(f"⬇️ Downloading... {pct} | {speed}", parse_mode=enums.ParseMode.HTML)
-            video_path = dl.files[0].path if dl.files else None
+            if link.startswith("magnet:"):
+                # Magnet links: use aria2c CLI directly for proper torrent handling
+                await status.edit_text("🧲 <b>Fetching torrent metadata...</b>", parse_mode=enums.ParseMode.HTML)
+                cmd = [
+                    "aria2c", "--seed-time=0", "--max-concurrent-downloads=5",
+                    "--dir", dl_dir, "--console-log-level=error",
+                    "--summary-interval=0", link
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await status.edit_text("⬇️ <b>Downloading torrent content...</b>\n<i>This may take a while...</i>", parse_mode=enums.ParseMode.HTML)
+                await proc.communicate()
+                
+                # Find the largest video file in the download directory
+                VIDEO_EXTS = {'.mp4', '.mkv', '.avi', '.webm', '.mov', '.flv', '.wmv', '.ts', '.m4v'}
+                largest_file = None
+                largest_size = 0
+                for root, dirs, files in os.walk(dl_dir):
+                    for f in files:
+                        ext = os.path.splitext(f)[1].lower()
+                        if ext in VIDEO_EXTS:
+                            fpath = os.path.join(root, f)
+                            fsize = os.path.getsize(fpath)
+                            if fsize > largest_size:
+                                largest_size = fsize
+                                largest_file = fpath
+                
+                video_path = largest_file
+                if video_path:
+                    size_mb = largest_size / (1024 * 1024)
+                    await status.edit_text(f"✅ <b>Downloaded!</b> Found: <code>{os.path.basename(video_path)}</code> ({size_mb:.0f} MB)", parse_mode=enums.ParseMode.HTML)
+            else:
+                # Direct URL: use aria2_api
+                global aria2_api
+                dl = aria2_api.add_uris([link], options={"dir": dl_dir})
+                while not dl.is_complete:
+                    await asyncio.sleep(3)
+                    dl.update()
+                    if dl.status == "error":
+                        return await status.edit_text(f"❌ Download error: {dl.error_message}")
+                    try:
+                        pct = dl.progress_string()
+                        speed = dl.download_speed_string()
+                        await status.edit_text(f"⬇️ Downloading... {pct} | {speed}", parse_mode=enums.ParseMode.HTML)
+                    except Exception:
+                        pass
+                video_path = dl.files[0].path if dl.files else None
         except Exception as e:
             return await status.edit_text(f"❌ Download failed: {e}")
     else:
@@ -1349,7 +1391,7 @@ async def handle_enhance(client, message):
         )
     
     if not video_path or not os.path.exists(video_path):
-        return await status.edit_text("❌ No video file found after download.")
+        return await status.edit_text("❌ No video file found after download.\n\n<i>Tip: Make sure the torrent/link contains a video file (.mp4, .mkv, etc.)</i>", parse_mode=enums.ParseMode.HTML)
     
     # --- Begin 4K Enhancement Pipeline ---
     basename = os.path.splitext(os.path.basename(video_path))[0]
