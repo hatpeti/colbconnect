@@ -39,7 +39,7 @@ try:
 except Exception:
     pass
 
-MASTER_WS_URL = "wss://worker-production-b25d.up.railway.app"
+MASTER_WS_URL = "wss://worker-production-d47f.up.railway.app"
 TARGET_CHANNEL = "@animedubsinhla"
 WATERMARK = "@animesinhala1"
 
@@ -1061,6 +1061,16 @@ async def handle_url(client, message):
         quote=True
     )
 
+# --- THUMBNAIL HANDLER ---
+async def save_thumbnail(client, message):
+    if message.photo:
+        status = await message.reply("🖼️ <i>Downloading thumbnail...</i>", parse_mode=enums.ParseMode.HTML)
+        try:
+            await message.download(file_name=CUSTOM_THUMB_PATH)
+            await status.edit_text("✅ <b>Custom thumbnail saved successfully!</b>\nIt will be used for all future uploads.", parse_mode=enums.ParseMode.HTML)
+        except Exception as e:
+            await status.edit_text(f"❌ <b>Error saving thumbnail:</b>\n{e}", parse_mode=enums.ParseMode.HTML)
+
 # --- REPLY COMMANDS & FILE SELECTION ---
 async def reply_handler(client, message):
     if not message.reply_to_message: return
@@ -1262,6 +1272,7 @@ async def main():
             app.add_handler(MessageHandler(handle_url, filters.command("url")))
             app.add_handler(MessageHandler(cancel_cmd, filters.regex(r"^/cancel")))
             app.add_handler(MessageHandler(handle_telegram_file, (filters.document | filters.video)))
+            app.add_handler(MessageHandler(save_thumbnail, filters.photo))
             app.add_handler(MessageHandler(reply_handler, filters.reply))
             app.add_handler(CallbackQueryHandler(cb_handler))
             
