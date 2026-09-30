@@ -1299,7 +1299,8 @@ async def _upscale_chunk_realesrgan(input_path, output_path):
         "-n", "RealESRGAN_x4plus_anime_6B",
         "-i", input_path,
         "-o", output_path,
-        "--outscale", "4"
+        "--outscale", "4",
+        "--half"
     ]
     code, out, err = await _run_shell(cmd)
     if code != 0:
@@ -1351,7 +1352,7 @@ async def _find_completed_chunks(client, job_tag):
         logger.warning(f"Resume search failed: {e}")
     return completed
 
-async def process_4k_enhancement(client, input_video_path, status_msg):
+async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
     """Main 4K pipeline: split → resume check → upscale → merge → encode"""
     basename = os.path.splitext(os.path.basename(input_video_path))[0]
     job_tag = basename.replace(" ", "_").replace(".", "_").replace("-", "_")
@@ -1404,6 +1405,11 @@ async def process_4k_enhancement(client, input_video_path, status_msg):
             final_chunks.append(out_path)
             continue
         
+        if task_id in ACTIVE_TASKS:
+            ACTIVE_TASKS[task_id].update({
+                "status": f"🚀 4K: Chunk {i+1}/{total}"
+            })
+            
         await status_msg.edit_text(
             f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\n"
             f"⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\n\n"
