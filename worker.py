@@ -1299,8 +1299,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path):
         "-n", "RealESRGAN_x4plus_anime_6B",
         "-i", input_path,
         "-o", output_path,
-        "--outscale", "4",
-        "--half"
+        "--outscale", "4"
     ]
     code, out, err = await _run_shell(cmd)
     if code != 0:
