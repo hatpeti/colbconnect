@@ -595,6 +595,13 @@ def get_panel_markup(task_id):
     ])
 
 # Sinhala Help Menu
+async def testdb_cmd(client, message):
+    try:
+        await client.send_message(PRIVATE_DB_CHANNEL, "✅ <b>Test Message:</b> DB Channel Connection is Working!", parse_mode=enums.ParseMode.HTML)
+        await message.reply_text("✅ Message sent to DB Channel successfully!")
+    except Exception as e:
+        await message.reply_text(f"❌ Failed to send to DB Channel: {e}")
+
 async def help_cmd(client, message):
     text = (
         "<b>📚 Super Encoder & Leech Bot Help Menu</b>\n\n"
@@ -1770,6 +1777,7 @@ async def main():
             # Register Handlers for Private AND Group chats
             app.add_handler(MessageHandler(start_cmd, filters.command("start")))
             app.add_handler(MessageHandler(help_cmd, filters.command("help")))
+            app.add_handler(MessageHandler(testdb_cmd, filters.command("testdb")))
             app.add_handler(MessageHandler(panel_cmd, filters.command(["panel", "encode"])))
             app.add_handler(MessageHandler(handle_leech, filters.command("leech")))
             app.add_handler(MessageHandler(handle_enhance, filters.command("enhance")))
@@ -1793,6 +1801,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
