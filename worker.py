@@ -1278,7 +1278,7 @@ async def _run_shell(cmd):
     stdout, stderr = await proc.communicate()
     return proc.returncode, stdout.decode(errors='ignore'), stderr.decode(errors='ignore')
 
-async def _split_video_to_chunks(input_video, output_dir, segment_seconds=8):
+async def _split_video_to_chunks(input_video, output_dir, segment_seconds=60):
     """FFmpeg: Split video into N-second segments"""
     os.makedirs(output_dir, exist_ok=True)
     basename = os.path.splitext(os.path.basename(input_video))[0]
@@ -1378,8 +1378,11 @@ async def _find_completed_chunks(client, job_tag):
     """Search Private DB Channel for already-completed chunks (Resume)"""
     completed = {}
     try:
-        # Bots can't use search_messages, so we scan the last 200 messages in the DB channel
-        async for msg in client.get_chat_history(chat_id=PRIVATE_DB_CHANNEL, limit=200):
+        tmp = await client.send_message(PRIVATE_DB_CHANNEL, "ping")
+        await tmp.delete()
+        msgs = await client.get_messages(PRIVATE_DB_CHANNEL, range(max(1, tmp.id - 200), tmp.id))
+        for msg in msgs:
+            if not msg or msg.empty: continue
             if msg.document or msg.video:
                 caption = msg.caption or ""
                 if job_tag in caption:
@@ -1404,7 +1407,7 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
     
     # Step 1: Split
     await status_msg.edit_text("✂️ <b>Step 1/4:</b> Splitting video into 1-min chunks...", parse_mode=enums.ParseMode.HTML)
-    raw_chunks = await _split_video_to_chunks(input_video_path, raw_dir, segment_seconds=8)
+    raw_chunks = await _split_video_to_chunks(input_video_path, raw_dir, segment_seconds=60)
     total = len(raw_chunks)
     if total == 0:
         await status_msg.edit_text("❌ FFmpeg split failed - no chunks created.")
@@ -1464,12 +1467,16 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
             parse_mode=enums.ParseMode.HTML
         )
         try:
+            safe_path = f"/content/upload_chunk_{i}.mp4"
+            import shutil
+            shutil.copy(out_path, safe_path)
             await client.send_document(
                 chat_id=PRIVATE_DB_CHANNEL,
-                document=out_path,
+                document=safe_path,
                 caption=f"🎬 4K Chunk | {basename}\n{chunk_tag}\n#{job_tag}",
                 force_document=True
             )
+            if os.path.exists(safe_path): os.remove(safe_path)
         except Exception as e:
             logger.error(f"Failed to upload chunk {i} to DB channel: {e}")
         
@@ -1598,7 +1605,7 @@ async def handle_enhance(client, message):
     
     # Step 1: Split
     await status.edit_text("✂️ <b>Step 1/4:</b> Splitting video into 1-min chunks...", parse_mode=enums.ParseMode.HTML)
-    raw_chunks = await _split_video_to_chunks(video_path, raw_dir, segment_seconds=8)
+    raw_chunks = await _split_video_to_chunks(video_path, raw_dir, segment_seconds=60)
     total = len(raw_chunks)
     if total == 0:
         return await status.edit_text("❌ FFmpeg split failed - no chunks created.")
@@ -1652,12 +1659,16 @@ async def handle_enhance(client, message):
             parse_mode=enums.ParseMode.HTML
         )
         try:
+            safe_path = f"/content/upload_chunk_{i}.mp4"
+            import shutil
+            shutil.copy(out_path, safe_path)
             await client.send_document(
                 chat_id=PRIVATE_DB_CHANNEL,
-                document=out_path,
+                document=safe_path,
                 caption=f"🎬 4K Chunk | {basename}\n{chunk_tag}\n#{job_tag}",
                 force_document=True
             )
+            if os.path.exists(safe_path): os.remove(safe_path)
         except Exception as e:
             logger.error(f"Failed to upload chunk {i} to DB channel: {e}")
             # Don't abort - we still have the local file
