@@ -1278,7 +1278,7 @@ async def _run_shell(cmd):
     stdout, stderr = await proc.communicate()
     return proc.returncode, stdout.decode(errors='ignore'), stderr.decode(errors='ignore')
 
-async def _split_video_to_chunks(input_video, output_dir, segment_seconds=180):
+async def _split_video_to_chunks(input_video, output_dir, segment_seconds=60):
     """FFmpeg: Split video into N-second segments"""
     os.makedirs(output_dir, exist_ok=True)
     basename = os.path.splitext(os.path.basename(input_video))[0]
@@ -1364,8 +1364,8 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
     os.makedirs(upscaled_dir, exist_ok=True)
     
     # Step 1: Split
-    await status_msg.edit_text("✂️ <b>Step 1/4:</b> Splitting video into 3-min chunks...", parse_mode=enums.ParseMode.HTML)
-    raw_chunks = await _split_video_to_chunks(input_video_path, raw_dir, segment_seconds=180)
+    await status_msg.edit_text("✂️ <b>Step 1/4:</b> Splitting video into 1-min chunks...", parse_mode=enums.ParseMode.HTML)
+    raw_chunks = await _split_video_to_chunks(input_video_path, raw_dir, segment_seconds=60)
     total = len(raw_chunks)
     if total == 0:
         await status_msg.edit_text("❌ FFmpeg split failed - no chunks created.")
@@ -1561,8 +1561,8 @@ async def handle_enhance(client, message):
     os.makedirs(upscaled_dir, exist_ok=True)
     
     # Step 1: Split
-    await status.edit_text("✂️ <b>Step 1/4:</b> Splitting video into 3-min chunks...", parse_mode=enums.ParseMode.HTML)
-    raw_chunks = await _split_video_to_chunks(video_path, raw_dir, segment_seconds=180)
+    await status.edit_text("✂️ <b>Step 1/4:</b> Splitting video into 1-min chunks...", parse_mode=enums.ParseMode.HTML)
+    raw_chunks = await _split_video_to_chunks(video_path, raw_dir, segment_seconds=60)
     total = len(raw_chunks)
     if total == 0:
         return await status.edit_text("❌ FFmpeg split failed - no chunks created.")
