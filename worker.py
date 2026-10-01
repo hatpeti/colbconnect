@@ -1328,7 +1328,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
             now = time.time()
             if match:
                 current_frame = int(match.group(1))
-                if current_frame - last_frame >= 50 or now - last_update > 30:
+                if current_frame - last_frame >= 1 or now - last_update > 8:
                     last_frame = current_frame
                     if clean:
                         try:
