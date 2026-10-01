@@ -1381,6 +1381,7 @@ async def _split_video_to_chunks(input_video, output_dir, segment_seconds=60):
 async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, prefix_text=""):
     """Run Real-ESRGAN inference on a single chunk with real-time progress"""
     import time
+    import re
     cmd = [
         "python", "/content/Real-ESRGAN/inference_realesrgan_video.py",
         "-n", "RealESRGAN_x4plus_anime_6B",
@@ -1395,6 +1396,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
     )
     
     last_update = time.time()
+    last_frame = 0
     err_acc = ""
     while True:
         line = await proc.stderr.read(1024)
@@ -1404,18 +1406,28 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
         err_acc += text
         
         if status_msg and ("%" in text or "it" in text):
+            parts = text.split("\r")
+            clean = parts[-1].strip() if parts else text.strip()
+            
+            # Extract frame number like "23/1440"
+            match = re.search(r'(\d+)/\d+', clean)
             now = time.time()
-            if now - last_update > 8:
-                parts = text.split("\r")
-                clean = parts[-1].strip() if parts else text.strip()
-                if clean:
-                    try:
-                        await status_msg.edit_text(f"{prefix_text}
-
-⏳ <b>AI Processing:</b>
-<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
-                        last_update = now
-                    except: pass
+            if match:
+                current_frame = int(match.group(1))
+                if current_frame - last_frame >= 50 or now - last_update > 30:
+                    last_frame = current_frame
+                    if clean:
+                        try:
+                            await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
+                            last_update = now
+                        except: pass
+            else:
+                if now - last_update > 8:
+                    if clean:
+                        try:
+                            await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
+                            last_update = now
+                        except: pass
 
     await proc.wait()
     return proc.returncode == 0 and os.path.exists(output_path), err_acc
@@ -1893,6 +1905,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
