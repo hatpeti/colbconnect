@@ -207,10 +207,8 @@ async def download_with_retry(client, message, file_name, chat_id=None, msg_id=N
                     with contextlib.suppress(Exception):
                         await client.send_message(
                             chat_id,
-                            f"🔄 <b>Download retry {attempt}/{max_retries}</b>
-"
-                            f"├ Refreshing connection & file reference...
-"
+                            f"🔄 <b>Download retry {attempt}/{max_retries}</b>\n"
+                            f"├ Refreshing connection & file reference...\n"
                             f"└ Previous error: <code>{safe_html(str(last_error)[:150])}</code>",
                             parse_mode=enums.ParseMode.HTML
                         )
@@ -366,8 +364,7 @@ def build_file_tree(files, is_html=True):
                 if is_html: idx_str = f"<code>{idx_str}</code>"
                 lines.append(f"{prefix}{connector}📄 {idx_str} {html.escape(key) if is_html else key} ({val['size'] / (1024*1024):.2f} MB)")
         return lines
-    return "
-".join(render_tree(tree))
+    return "\n".join(render_tree(tree))
 
 # --- GLOBAL PROGRESS UI LOOP ---
 async def ensure_status_message(chat_id):
@@ -425,45 +422,30 @@ async def global_ui_loop():
                 fname = t.get("filename", "Unknown")
 
                 block = (
-                    f"Task #{idx} By 👤 {user_disp}
-"
-                    f"├ 🎬 <b>{safe_html(fname)}</b>
-"
-                    f"├ [{bar}] {pct_clamped:.2f}%
-"
-                    f"├ Processed → {processed_str}
-"
-                    f"├ Status → {t.get('status', 'Processing')}
-"
-                    f"├ Speed → {speed_str}
-"
-                    f"├ Time → {eta_str}
-"
+                    f"Task #{idx} By 👤 {user_disp}\n"
+                    f"├ 🎬 <b>{safe_html(fname)}</b>\n"
+                    f"├ [{bar}] {pct_clamped:.2f}%\n"
+                    f"├ Processed → {processed_str}\n"
+                    f"├ Status → {t.get('status', 'Processing')}\n"
+                    f"├ Speed → {speed_str}\n"
+                    f"├ Time → {eta_str}\n"
                     f"└ Stop → /cancel_{task_id}"
                 )
                 task_blocks.append(block)
 
             stats_block = (
-                f"Bot Stats 🤖
-"
-                f"├ CPU → {cpu_pct}% | Disk → {disk_free} [{disk_pct}%]
-"
+                f"Bot Stats 🤖\n"
+                f"├ CPU → {cpu_pct}% | Disk → {disk_free} [{disk_pct}%]\n"
                 f"└ RAM → ram_pct: {ram_pct}% | UP → {uptime}"
             )
             # Fix stats line display
             stats_block = (
-                f"<b>Bot Stats</b> 🤖
-"
-                f"├ CPU → {cpu_pct}% | Disk → {disk_free} [{disk_pct}%]
-"
+                f"<b>Bot Stats</b> 🤖\n"
+                f"├ CPU → {cpu_pct}% | Disk → {disk_free} [{disk_pct}%]\n"
                 f"└ RAM → {ram_pct}% | UP → {uptime}"
             )
 
-            full_text = "
-
-".join(task_blocks) + "
-
-" + stats_block
+            full_text = "\n\n".join(task_blocks) + "\n\n" + stats_block
 
             try:
                 await status_msg.edit_text(full_text, parse_mode=enums.ParseMode.HTML)
@@ -573,8 +555,7 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, tas
     await process.wait()
     if process.returncode != 0:
         err = await process.stderr.read()
-        raise Exception(f"FFMPEG Failed:
-{err.decode('utf-8', errors='ignore')[-1000:]}")
+        raise Exception(f"FFMPEG Failed:\n{err.decode('utf-8', errors='ignore')[-1000:]}")
     return os.path.exists(output_path)
 
 async def encode_video(input_path, output_path, resolution, total_duration, task_id, filename):
@@ -616,55 +597,27 @@ def get_panel_markup(task_id):
 # Sinhala Help Menu
 async def help_cmd(client, message):
     text = (
-        "<b>📚 Super Encoder & Leech Bot Help Menu</b>
-
-"
-        "<b>📥 ටොරන්ට් භාගත කිරීම:</b>
-"
-        "<code>/leech &lt;magnet_link&gt;</code> - Torrent එකක් භාගත කර File list එක ලබා ගෙන අවශ්‍ය files තෝරාගැනීමට.
-
-"
-        "<b>🎨 Encoding Panel Commands:</b>
-"
-        "පහත Commands ඔයාට Panel එකේ බොත්තම් විදියට වගේම, කෙලින්ම <b>වීඩියෝ එකකට Reply කරලත්</b> පාවිච්චි කරන්න පුළුවන්.
-
-"
-        "<b>🎬 Video Resolutions:</b>
-"
-        "<code>/480</code> - 480p වලට Convert කිරීම.
-"
-        "<code>/720</code> - 720p වලට Convert කිරීම.
-"
-        "<code>/1080</code> - 1080p වලට Convert කිරීම.
-"
-        "<code>/reencode</code> - 480p, 720p, 1080p සහ Original එකත් එක්ක File 4ක්ම ලබා දීම.
-
-"
-        "<b>✂️ Subtitles:</b>
-"
-        "<code>/removesub</code> - Soft subtitles අයින් කිරීම.
-"
-        "<code>/addsub</code> - Subtitle එකතු කිරීම (වීඩියෝ එකකට subtitle file එකක් reply කරන්න).
-"
-        "<code>/extract_sub</code> - Subtitle එක වෙනම ගලවාගැනීම.
-
-"
-        "<b>🎵 Audio:</b>
-"
-        "<code>/addaudio</code> - අලුත් Audio Track එකක් දැමීම.
-"
-        "<code>/extract_audio</code> - Audio එක වෙනම ගලවාගැනීම.
-"
-        "<code>/remaudio</code> - Audio Track එක අයින් කිරීම.
-
-"
-        "<b>🖼 Thumbnail:</b>
-"
-        "<code>/extract_thumb</code> - වීඩියෝ එකේ Thumbnail එක ගලවාගැනීම.
-
-"
-        "<b>🛑 Tasks නැවැත්වීම:</b>
-"
+        "<b>📚 Super Encoder & Leech Bot Help Menu</b>\n\n"
+        "<b>📥 ටොරන්ට් භාගත කිරීම:</b>\n"
+        "<code>/leech &lt;magnet_link&gt;</code> - Torrent එකක් භාගත කර File list එක ලබා ගෙන අවශ්‍ය files තෝරාගැනීමට.\n\n"
+        "<b>🎨 Encoding Panel Commands:</b>\n"
+        "පහත Commands ඔයාට Panel එකේ බොත්තම් විදියට වගේම, කෙලින්ම <b>වීඩියෝ එකකට Reply කරලත්</b> පාවිච්චි කරන්න පුළුවන්.\n\n"
+        "<b>🎬 Video Resolutions:</b>\n"
+        "<code>/480</code> - 480p වලට Convert කිරීම.\n"
+        "<code>/720</code> - 720p වලට Convert කිරීම.\n"
+        "<code>/1080</code> - 1080p වලට Convert කිරීම.\n"
+        "<code>/reencode</code> - 480p, 720p, 1080p සහ Original එකත් එක්ක File 4ක්ම ලබා දීම.\n\n"
+        "<b>✂️ Subtitles:</b>\n"
+        "<code>/removesub</code> - Soft subtitles අයින් කිරීම.\n"
+        "<code>/addsub</code> - Subtitle එකතු කිරීම (වීඩියෝ එකකට subtitle file එකක් reply කරන්න).\n"
+        "<code>/extract_sub</code> - Subtitle එක වෙනම ගලවාගැනීම.\n\n"
+        "<b>🎵 Audio:</b>\n"
+        "<code>/addaudio</code> - අලුත් Audio Track එකක් දැමීම.\n"
+        "<code>/extract_audio</code> - Audio එක වෙනම ගලවාගැනීම.\n"
+        "<code>/remaudio</code> - Audio Track එක අයින් කිරීම.\n\n"
+        "<b>🖼 Thumbnail:</b>\n"
+        "<code>/extract_thumb</code> - වීඩියෝ එකේ Thumbnail එක ගලවාගැනීම.\n\n"
+        "<b>🛑 Tasks නැවැත්වීම:</b>\n"
         "<code>/cancel_&lt;task_id&gt;</code> - ඕනෑම ක්‍රියාවලියක් නතර කිරීමට."
     )
     await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
@@ -822,8 +775,7 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
                         with contextlib.suppress(Exception):
                             await client.send_message(
                                 chat_id,
-                                f"⚠️ <b>Database Warning:</b> Bot cannot post to <code>{TARGET_CHANNEL}</code>.
-"
+                                f"⚠️ <b>Database Warning:</b> Bot cannot post to <code>{TARGET_CHANNEL}</code>.\n"
                                 f"Please add the bot as an <b>Admin with 'Post Messages' permission</b> to the channel!",
                                 parse_mode=enums.ParseMode.HTML
                             )
@@ -834,10 +786,8 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
             with contextlib.suppress(Exception):
                 await client.send_message(
                     chat_id,
-                    f"❌ <b>Upload Failed:</b> <code>{safe_html(f_name)}</code>
-"
-                    f"Error: <code>{safe_html(str(e)[:200])}</code>
-"
+                    f"❌ <b>Upload Failed:</b> <code>{safe_html(f_name)}</code>\n"
+                    f"Error: <code>{safe_html(str(e)[:200])}</code>\n"
                     f"🔄 Try sending the file again.",
                     parse_mode=enums.ParseMode.HTML
                 )
@@ -891,20 +841,12 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                     with contextlib.suppress(Exception):
                         await client.send_message(
                             chat_id,
-                            f"❌ <b>Download Failed:</b> <code>{safe_html(file_name)}</code>
-"
-                            f"Error: <code>{safe_html(str(dl_err)[:200])}</code>
-
-"
-                            f"💡 <i>Possible reasons:</i>
-"
-                            f"• Telegram server timeout (large file)
-"
-                            f"• Colab network issue
-"
-                            f"• File too large for current session
-
-"
+                            f"❌ <b>Download Failed:</b> <code>{safe_html(file_name)}</code>\n"
+                            f"Error: <code>{safe_html(str(dl_err)[:200])}</code>\n\n"
+                            f"💡 <i>Possible reasons:</i>\n"
+                            f"• Telegram server timeout (large file)\n"
+                            f"• Colab network issue\n"
+                            f"• File too large for current session\n\n"
                             f"🔄 <b>Try again or use a smaller file.</b>",
                             parse_mode=enums.ParseMode.HTML
                         )
@@ -916,8 +858,7 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                     with contextlib.suppress(Exception):
                         await client.send_message(
                             chat_id,
-                            f"❌ <b>Download Error:</b> File <code>{safe_html(file_name)}</code> was not saved properly.
-"
+                            f"❌ <b>Download Error:</b> File <code>{safe_html(file_name)}</code> was not saved properly.\n"
                             f"🔄 <b>Please try again.</b>",
                             parse_mode=enums.ParseMode.HTML
                         )
@@ -932,16 +873,13 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                         file_size = os.path.getsize(final_4k)
                         if file_size > MAX_FILE_SIZE:
                             await client.send_document(chat_id=PRIVATE_DB_CHANNEL, document=final_4k,
-                                caption=f"🎬 4K FINAL | {os.path.basename(final_4k)}
-#FINAL", force_document=True)
+                                caption=f"🎬 4K FINAL | {os.path.basename(final_4k)}\n#FINAL", force_document=True)
                             await status_msg.edit_text("✅ <b>Done!</b> Final 4K video saved to DB Channel (too large for chat).")
                         else:
                             thumb = CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None
                             await client.send_document(
                                 chat_id=chat_id, document=final_4k,
-                                caption=f"🎬 <b>{os.path.basename(final_4k)} — 4K Enhanced</b>
-10-bit HEVC x265 | Real-ESRGAN
-{WATERMARK}",
+                                caption=f"🎬 <b>{os.path.basename(final_4k)} — 4K Enhanced</b>\n10-bit HEVC x265 | Real-ESRGAN\n{WATERMARK}",
                                 parse_mode=enums.ParseMode.HTML, thumb=thumb, force_document=True
                             )
                             await status_msg.edit_text("✅ <b>4K Enhancement Complete!</b> 🎉", parse_mode=enums.ParseMode.HTML)
@@ -1006,16 +944,13 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                                     file_size = os.path.getsize(final_4k)
                                     if file_size > MAX_FILE_SIZE:
                                         await client.send_document(chat_id=PRIVATE_DB_CHANNEL, document=final_4k,
-                                            caption=f"🎬 4K FINAL | {os.path.basename(final_4k)}
-#FINAL", force_document=True)
+                                            caption=f"🎬 4K FINAL | {os.path.basename(final_4k)}\n#FINAL", force_document=True)
                                         await status_msg.edit_text("✅ <b>Done!</b> Final 4K video saved to DB Channel (too large for chat).")
                                     else:
                                         thumb = CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None
                                         await client.send_document(
                                             chat_id=chat_id, document=final_4k,
-                                            caption=f"🎬 <b>{os.path.basename(final_4k)} — 4K Enhanced</b>
-10-bit HEVC x265 | Real-ESRGAN
-{WATERMARK}",
+                                            caption=f"🎬 <b>{os.path.basename(final_4k)} — 4K Enhanced</b>\n10-bit HEVC x265 | Real-ESRGAN\n{WATERMARK}",
                                             parse_mode=enums.ParseMode.HTML, thumb=thumb, force_document=True
                                         )
                                         await status_msg.edit_text("✅ <b>4K Enhancement Complete!</b> 🎉", parse_mode=enums.ParseMode.HTML)
@@ -1033,10 +968,7 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
             with contextlib.suppress(Exception):
                 await client.send_message(
                     chat_id,
-                    f"❌ <b>Task Error:</b>
-<code>{safe_html(str(e)[:300])}</code>
-
-🔄 <b>Please try again.</b>",
+                    f"❌ <b>Task Error:</b>\n<code>{safe_html(str(e)[:300])}</code>\n\n🔄 <b>Please try again.</b>",
                     parse_mode=enums.ParseMode.HTML
                 )
         finally:
@@ -1055,10 +987,7 @@ async def handle_telegram_file(client, message):
         task_id = str(message.id)
         
         await message.reply_text(
-            f"<b>🎬 File Detected:</b>
-<code>{safe_html(file_name)}</code>
-
-"
+            f"<b>🎬 File Detected:</b>\n<code>{safe_html(file_name)}</code>\n\n"
             "👉 <i>Choose an action from the Encoding Panel below:</i>",
             reply_markup=get_panel_markup(task_id),
             parse_mode=enums.ParseMode.HTML,
@@ -1085,10 +1014,7 @@ async def panel_cmd(client, message):
             
         task_id = str(media_msg.id)
         await message.reply_text(
-            f"<b>🎬 File Detected:</b>
-<code>{safe_html(file_name)}</code>
-
-"
+            f"<b>🎬 File Detected:</b>\n<code>{safe_html(file_name)}</code>\n\n"
             "👉 <i>Choose an action from the Encoding Panel below:</i>",
             reply_markup=get_panel_markup(task_id),
             parse_mode=enums.ParseMode.HTML,
@@ -1129,11 +1055,8 @@ async def handle_leech(client, message):
         tree_html = build_file_tree(files, True)
         tree_txt = build_file_tree(files, False)
         
-        caption = (f"✅ <b>Torrent Identified!</b>
-
-"
-                   f"👉 <b>Reply to this message</b> with file numbers to download.
-"
+        caption = (f"✅ <b>Torrent Identified!</b>\n\n"
+                   f"👉 <b>Reply to this message</b> with file numbers to download.\n"
                    f"Example: <code>1,3,5-7</code> (or <code>all</code> for everything)")
         
         if len(tree_html) > 3500:
@@ -1141,10 +1064,7 @@ async def handle_leech(client, message):
             with open(txt_path, "w") as f: f.write(tree_txt)
             prompt = await message.reply_document(document=txt_path, caption=caption, parse_mode=enums.ParseMode.HTML)
         else:
-            prompt = await message.reply_text(f"<b>Files:</b>
-{tree_html}
-
-{caption}", parse_mode=enums.ParseMode.HTML)
+            prompt = await message.reply_text(f"<b>Files:</b>\n{tree_html}\n\n{caption}", parse_mode=enums.ParseMode.HTML)
             
         task_id = str(prompt.id)
         current_tasks[task_id] = {
@@ -1175,10 +1095,7 @@ async def handle_url(client, message):
     }
     
     await message.reply_text(
-        f"<b>🔗 URL Detected:</b>
-<code>{safe_html(url)}</code>
-
-"
+        f"<b>🔗 URL Detected:</b>\n<code>{safe_html(url)}</code>\n\n"
         "👉 <i>Choose an action from the Encoding Panel below:</i>",
         reply_markup=get_panel_markup(task_id),
         parse_mode=enums.ParseMode.HTML,
@@ -1191,11 +1108,9 @@ async def save_thumbnail(client, message):
         status = await message.reply("🖼️ <i>Downloading thumbnail...</i>", parse_mode=enums.ParseMode.HTML)
         try:
             await message.download(file_name=CUSTOM_THUMB_PATH)
-            await status.edit_text("✅ <b>Custom thumbnail saved successfully!</b>
-It will be used for all future uploads.", parse_mode=enums.ParseMode.HTML)
+            await status.edit_text("✅ <b>Custom thumbnail saved successfully!</b>\nIt will be used for all future uploads.", parse_mode=enums.ParseMode.HTML)
         except Exception as e:
-            await status.edit_text(f"❌ <b>Error saving thumbnail:</b>
-{e}", parse_mode=enums.ParseMode.HTML)
+            await status.edit_text(f"❌ <b>Error saving thumbnail:</b>\n{e}", parse_mode=enums.ParseMode.HTML)
 
 # --- REPLY COMMANDS & FILE SELECTION ---
 async def reply_handler(client, message):
@@ -1323,8 +1238,7 @@ async def cb_handler(client, cb):
         if is_tg and (not media_target or not (media_target.document or media_target.video)):
             logger.error(f"No valid media found for task {task_id}")
             await cb.message.reply(
-                "❌ <b>Error:</b> Could not find the original file message.
-"
+                "❌ <b>Error:</b> Could not find the original file message.\n"
                 "🔄 <b>Please re-send the video and try again.</b>",
                 parse_mode=enums.ParseMode.HTML
             )
@@ -1451,8 +1365,7 @@ async def _merge_chunks(chunk_files, output_path):
     list_file = "/content/_merge_list.txt"
     with open(list_file, "w") as f:
         for c in chunk_files:
-            f.write(f"file '{os.path.abspath(c)}'
-")
+            f.write(f"file '{os.path.abspath(c)}'\n")
     cmd = [
         "ffmpeg", "-y", "-f", "concat", "-safe", "0",
         "-i", list_file, "-c", "copy", output_path
@@ -1470,8 +1383,7 @@ async def _find_completed_chunks(client, job_tag):
             if msg.document or msg.video:
                 caption = msg.caption or ""
                 if job_tag in caption:
-                    for line in caption.split("
-"):
+                    for line in caption.split("\n"):
                         line = line.strip()
                         if line.startswith("#") and "_Chunk_" in line:
                             completed[line] = msg
@@ -1515,8 +1427,7 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
         if chunk_tag in existing:
             skipped += 1
             await status_msg.edit_text(
-                f"⏩ <b>Chunk {i+1}/{total}</b> — already in DB! Downloading back...
-"
+                f"⏩ <b>Chunk {i+1}/{total}</b> — already in DB! Downloading back...\n"
                 f"(Skipped: {skipped} | Remaining: {total - i - 1})",
                 parse_mode=enums.ParseMode.HTML
             )
@@ -1529,10 +1440,7 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
                 success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status_msg, msg_text)
                 if not success:
                     err_snippet = safe_html(str(err_msg)[-800:]) if err_msg else "Unknown Error"
-                    await status_msg.edit_text(f"❌ Upscaling failed at chunk {i+1}.
-
-<b>Error details:</b>
-<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
+                    await status_msg.edit_text(f"❌ Upscaling failed at chunk {i+1}.\n\n<b>Error details:</b>\n<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
                     return None
             final_chunks.append(out_path)
             continue
@@ -1542,19 +1450,13 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
                 "status": f"🚀 4K: Chunk {i+1}/{total}"
             })
             
-        msg_text = f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\
-⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\
-\
-<i>This may take 15-40 min per chunk depending on GPU.</i>"
+        msg_text = f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\n⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\n\n<i>This may take 15-40 min per chunk depending on GPU.</i>"
         await status_msg.edit_text(msg_text, parse_mode=enums.ParseMode.HTML)
         
         success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status_msg, msg_text)
         if not success:
             err_snippet = safe_html(str(err_msg)[-800:]) if err_msg else "Unknown Error"
-            await status_msg.edit_text(f"❌ Real-ESRGAN failed on chunk {i+1}/{total}.
-
-<b>Error details:</b>
-<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
+            await status_msg.edit_text(f"❌ Real-ESRGAN failed on chunk {i+1}/{total}.\n\n<b>Error details:</b>\n<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
             return None
         
         await status_msg.edit_text(
@@ -1565,9 +1467,7 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
             await client.send_document(
                 chat_id=PRIVATE_DB_CHANNEL,
                 document=out_path,
-                caption=f"🎬 4K Chunk | {basename}
-{chunk_tag}
-#{job_tag}",
+                caption=f"🎬 4K Chunk | {basename}\n{chunk_tag}\n#{job_tag}",
                 force_document=True
             )
         except Exception as e:
@@ -1635,8 +1535,7 @@ async def handle_enhance(client, message):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                await status.edit_text("⬇️ <b>Downloading torrent content...</b>
-<i>This may take a while...</i>", parse_mode=enums.ParseMode.HTML)
+                await status.edit_text("⬇️ <b>Downloading torrent content...</b>\n<i>This may take a while...</i>", parse_mode=enums.ParseMode.HTML)
                 await proc.communicate()
                 
                 # Find the largest video file in the download directory
@@ -1677,22 +1576,15 @@ async def handle_enhance(client, message):
             return await status.edit_text(f"❌ Download failed: {e}")
     else:
         return await message.reply(
-            "📖 <b>4K Enhance - Usage:</b>
-
-"
-            "• Reply to a video: <code>/enhance</code>
-"
-            "• Direct link/magnet: <code>/enhance &lt;url_or_magnet&gt;</code>
-
-"
+            "📖 <b>4K Enhance - Usage:</b>\n\n"
+            "• Reply to a video: <code>/enhance</code>\n"
+            "• Direct link/magnet: <code>/enhance &lt;url_or_magnet&gt;</code>\n\n"
             "Bot will split → upscale 4K → auto-save to DB channel → merge & send.",
             parse_mode=enums.ParseMode.HTML
         )
     
     if not video_path or not os.path.exists(video_path):
-        return await status.edit_text("❌ No video file found after download.
-
-<i>Tip: Make sure the torrent/link contains a video file (.mp4, .mkv, etc.)</i>", parse_mode=enums.ParseMode.HTML)
+        return await status.edit_text("❌ No video file found after download.\n\n<i>Tip: Make sure the torrent/link contains a video file (.mp4, .mkv, etc.)</i>", parse_mode=enums.ParseMode.HTML)
     
     # --- Begin 4K Enhancement Pipeline ---
     basename = os.path.splitext(os.path.basename(video_path))[0]
@@ -1729,8 +1621,7 @@ async def handle_enhance(client, message):
         if chunk_tag in existing:
             skipped += 1
             await status.edit_text(
-                f"⏩ <b>Chunk {i+1}/{total}</b> — already in DB! Downloading back...
-"
+                f"⏩ <b>Chunk {i+1}/{total}</b> — already in DB! Downloading back...\n"
                 f"(Skipped: {skipped} | Remaining: {total - i - 1})",
                 parse_mode=enums.ParseMode.HTML
             )
@@ -1748,10 +1639,7 @@ async def handle_enhance(client, message):
             continue
         
         # Process this chunk fresh
-        msg_text = f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\
-⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\
-\
-<i>This may take 15-40 min per chunk depending on GPU.</i>"
+        msg_text = f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\n⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\n\n<i>This may take 15-40 min per chunk depending on GPU.</i>"
         await status.edit_text(msg_text, parse_mode=enums.ParseMode.HTML)
         
         success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status, msg_text)
@@ -1767,9 +1655,7 @@ async def handle_enhance(client, message):
             await client.send_document(
                 chat_id=PRIVATE_DB_CHANNEL,
                 document=out_path,
-                caption=f"🎬 4K Chunk | {basename}
-{chunk_tag}
-#{job_tag}",
+                caption=f"🎬 4K Chunk | {basename}\n{chunk_tag}\n#{job_tag}",
                 force_document=True
             )
         except Exception as e:
@@ -1802,23 +1688,19 @@ async def handle_enhance(client, message):
         file_size = os.path.getsize(final_output)
         if file_size > MAX_FILE_SIZE:
             await status.edit_text(
-                f"⚠️ Final video is {file_size // (1024*1024)} MB (over 2GB limit).
-"
+                f"⚠️ Final video is {file_size // (1024*1024)} MB (over 2GB limit).\n"
                 f"Uploading to DB Channel instead...",
                 parse_mode=enums.ParseMode.HTML
             )
             await client.send_document(chat_id=PRIVATE_DB_CHANNEL, document=final_output,
-                caption=f"🎬 4K FINAL | {basename}
-#{job_tag}_FINAL", force_document=True)
+                caption=f"🎬 4K FINAL | {basename}\n#{job_tag}_FINAL", force_document=True)
             await status.edit_text("✅ <b>Done!</b> Final 4K video saved to DB Channel (too large for chat).")
         else:
             thumb = CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None
             await client.send_document(
                 chat_id=message.chat.id,
                 document=final_output,
-                caption=f"🎬 <b>{basename} — 4K Enhanced</b>
-10-bit HEVC x265 | Real-ESRGAN
-{WATERMARK}",
+                caption=f"🎬 <b>{basename} — 4K Enhanced</b>\n10-bit HEVC x265 | Real-ESRGAN\n{WATERMARK}",
                 parse_mode=enums.ParseMode.HTML,
                 thumb=thumb,
                 force_document=True
@@ -1835,15 +1717,10 @@ async def handle_enhance(client, message):
 # --- START COMMAND ---
 async def start_cmd(client, message):
     await message.reply(
-        "⚡ <b>Colab Worker 3.0 is Online & Ready!</b>
-
-"
-        "• Use <code>/leech &lt;magnet_link&gt;</code> to download torrents.
-"
-        "• Use <code>/enhance</code> (reply to video) or <code>/enhance &lt;url&gt;</code> for <b>4K Upscaling</b>.
-"
-        "• Send or reply to any video to open the <b>Encoding Panel</b>.
-"
+        "⚡ <b>Colab Worker 3.0 is Online & Ready!</b>\n\n"
+        "• Use <code>/leech &lt;magnet_link&gt;</code> to download torrents.\n"
+        "• Use <code>/enhance</code> (reply to video) or <code>/enhance &lt;url&gt;</code> for <b>4K Upscaling</b>.\n"
+        "• Send or reply to any video to open the <b>Encoding Panel</b>.\n"
         "• Use <code>/help</code> for commands list (සිංහල).",
         parse_mode=enums.ParseMode.HTML
     )
@@ -1905,7 +1782,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 
