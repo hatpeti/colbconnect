@@ -1407,7 +1407,7 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
     
     # Step 1: Split
     await status_msg.edit_text("✂️ <b>Step 1/4:</b> Splitting video into 1-min chunks...", parse_mode=enums.ParseMode.HTML)
-    raw_chunks = await _split_video_to_chunks(input_video_path, raw_dir, segment_seconds=60)
+    raw_chunks = await _split_video_to_chunks(input_video_path, raw_dir, segment_seconds=8)
     total = len(raw_chunks)
     if total == 0:
         await status_msg.edit_text("❌ FFmpeg split failed - no chunks created.")
