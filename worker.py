@@ -1474,7 +1474,6 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
             parse_mode=enums.ParseMode.HTML
         )
         try:
-            import os, glob
             if os.path.isdir(out_path):
                 vids = glob.glob(os.path.join(out_path, "*.mp4")) + glob.glob(os.path.join(out_path, "*.mkv"))
                 if vids:
@@ -1671,7 +1670,6 @@ async def handle_enhance(client, message):
             parse_mode=enums.ParseMode.HTML
         )
         try:
-            import os, glob
             if os.path.isdir(out_path):
                 vids = glob.glob(os.path.join(out_path, "*.mp4")) + glob.glob(os.path.join(out_path, "*.mkv"))
                 if vids:
