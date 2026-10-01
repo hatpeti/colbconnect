@@ -1292,20 +1292,44 @@ async def _split_video_to_chunks(input_video, output_dir, segment_seconds=60):
     await _run_shell(cmd)
     return sorted(glob.glob(os.path.join(output_dir, f"{basename}_chunk_*.mp4")))
 
-async def _upscale_chunk_realesrgan(input_path, output_path):
-    """Run Real-ESRGAN inference on a single chunk"""
+async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, prefix_text=""):
+    """Run Real-ESRGAN inference on a single chunk with real-time progress"""
+    import time
     cmd = [
         "python", "/content/Real-ESRGAN/inference_realesrgan_video.py",
         "-n", "RealESRGAN_x4plus_anime_6B",
         "-i", input_path,
         "-o", output_path,
-        "--outscale", "4",
-        
+        "--outscale", "4"
     ]
-    code, out, err = await _run_shell(cmd)
-    if code != 0:
-        logger.error(f"Real-ESRGAN failed for {input_path}:\nSTDOUT: {out}\nSTDERR: {err}")
-    return code == 0 and os.path.exists(output_path), err
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    
+    last_update = time.time()
+    err_acc = ""
+    while True:
+        line = await proc.stderr.read(1024)
+        if not line:
+            break
+        text = line.decode('utf-8', errors='ignore')
+        err_acc += text
+        
+        if status_msg and ("%" in text or "it" in text):
+            now = time.time()
+            if now - last_update > 8:
+                parts = text.split("\r")
+                clean = parts[-1].strip() if parts else text.strip()
+                if clean:
+                    try:
+                        await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
+                        last_update = now
+                    except: pass
+
+    await proc.wait()
+    return proc.returncode == 0 and os.path.exists(output_path), err_acc
 
 async def _encode_hevc_10bit(input_path, output_path):
     """FFmpeg: Re-encode to 10-bit HEVC x265"""
@@ -1397,7 +1421,8 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
             except Exception as e:
                 logger.error(f"Failed to download chunk {i} from DB: {e}")
                 await status_msg.edit_text(f"⚠️ DB download failed for chunk {i+1}, re-processing...")
-                success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path)
+                msg_text = f"⚠️ DB download failed for chunk {i+1}, re-processing..."
+                success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status_msg, msg_text)
                 if not success:
                     err_snippet = safe_html(str(err_msg)[-800:]) if err_msg else "Unknown Error"
                     await status_msg.edit_text(f"❌ Upscaling failed at chunk {i+1}.\n\n<b>Error details:</b>\n<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
@@ -1410,14 +1435,10 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
                 "status": f"🚀 4K: Chunk {i+1}/{total}"
             })
             
-        await status_msg.edit_text(
-            f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\n"
-            f"⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\n\n"
-            f"<i>This may take 15-40 min per chunk depending on GPU.</i>",
-            parse_mode=enums.ParseMode.HTML
-        )
+        msg_text = f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\\n⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\\n\\n<i>This may take 15-40 min per chunk depending on GPU.</i>"
+        await status_msg.edit_text(msg_text, parse_mode=enums.ParseMode.HTML)
         
-        success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path)
+        success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status_msg, msg_text)
         if not success:
             err_snippet = safe_html(str(err_msg)[-800:]) if err_msg else "Unknown Error"
             await status_msg.edit_text(f"❌ Real-ESRGAN failed on chunk {i+1}/{total}.\n\n<b>Error details:</b>\n<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
@@ -1595,21 +1616,18 @@ async def handle_enhance(client, message):
                 logger.error(f"Failed to download chunk {i} from DB: {e}")
                 # If download fails, re-process it
                 await status.edit_text(f"⚠️ DB download failed for chunk {i+1}, re-processing...")
-                success = await _upscale_chunk_realesrgan(raw_chunk, out_path)
+                msg_text = f"⚠️ DB download failed for chunk {i+1}, re-processing..."
+                success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status, msg_text)
                 if not success:
                     return await status.edit_text(f"❌ Upscaling failed at chunk {i+1}.")
             final_chunks.append(out_path)
             continue
         
         # Process this chunk fresh
-        await status.edit_text(
-            f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\n"
-            f"⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\n\n"
-            f"<i>This may take 15-40 min per chunk depending on GPU.</i>",
-            parse_mode=enums.ParseMode.HTML
-        )
+        msg_text = f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\\n⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\\n\\n<i>This may take 15-40 min per chunk depending on GPU.</i>"
+        await status.edit_text(msg_text, parse_mode=enums.ParseMode.HTML)
         
-        success = await _upscale_chunk_realesrgan(raw_chunk, out_path)
+        success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status, msg_text)
         if not success:
             return await status.edit_text(f"❌ Real-ESRGAN failed on chunk {i+1}/{total}.")
         
@@ -1749,3 +1767,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
