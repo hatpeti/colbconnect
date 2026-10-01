@@ -1474,6 +1474,11 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
             parse_mode=enums.ParseMode.HTML
         )
         try:
+            import os, glob
+            if os.path.isdir(out_path):
+                vids = glob.glob(os.path.join(out_path, "*.mp4")) + glob.glob(os.path.join(out_path, "*.mkv"))
+                if vids:
+                    out_path = vids[0]
             safe_path = f"/content/upload_chunk_{i}.mp4"
             import shutil
             shutil.copy(out_path, safe_path)
@@ -1666,6 +1671,11 @@ async def handle_enhance(client, message):
             parse_mode=enums.ParseMode.HTML
         )
         try:
+            import os, glob
+            if os.path.isdir(out_path):
+                vids = glob.glob(os.path.join(out_path, "*.mp4")) + glob.glob(os.path.join(out_path, "*.mkv"))
+                if vids:
+                    out_path = vids[0]
             safe_path = f"/content/upload_chunk_{i}.mp4"
             import shutil
             shutil.copy(out_path, safe_path)
