@@ -1366,8 +1366,8 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
 
                             try:
                                 await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
-                            last_update = now
-                        except: pass
+                                last_update = now
+                            except: pass
             else:
                 if now - last_update > 8:
                     if clean:
@@ -1380,8 +1380,8 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
 
                             try:
                                 await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
-                            last_update = now
-                        except: pass
+                                last_update = now
+                            except: pass
 
     await proc.wait()
     return proc.returncode == 0 and os.path.exists(output_path), err_acc
