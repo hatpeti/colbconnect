@@ -1482,20 +1482,20 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id, 
                 failed_chunks += 1
                 return False
                 
-            # Upload to DB channel
-            try:
-                await client.send_document(
-                    chat_id=PRIVATE_DB_CHANNEL,
-                    document=out_path,
-                    caption=f"🎬 4K Chunk |\n{basename}\n{chunk_tag}\n{WATERMARK}"
-                )
-                logger.info(f"Uploaded {chunk_tag} to DB Channel.")
-            except Exception as e:
-                logger.error(f"Failed to upload {chunk_tag} to DB: {e}")
-                
-            completed_chunks += 1
-            final_chunks[i] = out_path
-            return True
+        # Upload to DB channel OUTSIDE the semaphore so GPU isn't idle during upload!
+        try:
+            await client.send_document(
+                chat_id=PRIVATE_DB_CHANNEL,
+                document=out_path,
+                caption=f"🎬 4K Chunk |\n{basename}\n{chunk_tag}\n{WATERMARK}"
+            )
+            logger.info(f"Uploaded {chunk_tag} to DB Channel.")
+        except Exception as e:
+            logger.error(f"Failed to upload {chunk_tag} to DB: {e}")
+            
+        completed_chunks += 1
+        final_chunks[i] = out_path
+        return True
 
     # Start a background task to update status message periodically
     async def update_status():
