@@ -1520,7 +1520,6 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id, 
     if not all(results):
         await status_msg.edit_text("❌ Upscaling failed for some chunks. Please check logs.")
         return None
-            continue
         
         if task_id in ACTIVE_TASKS:
             ACTIVE_TASKS[task_id].update({
