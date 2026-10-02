@@ -1302,7 +1302,7 @@ async def _split_video_to_chunks(input_video, output_dir, segment_seconds=60):
     await _run_shell(cmd)
     return sorted(glob.glob(os.path.join(output_dir, f"{basename}_chunk_*.mp4")))
 
-async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, prefix_text="", model="6B"):
+async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, prefix_text="", model="6B", progress_callback=None):
     """Run Real-ESRGAN inference on a single chunk with real-time progress"""
     import time
     import re
@@ -1453,6 +1453,7 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id, 
     completed_chunks = 0
     failed_chunks = 0
     final_chunks = [None] * total
+    chunk_progress = {}
     
     async def process_single_chunk(i, raw_chunk):
         nonlocal completed_chunks, failed_chunks, skipped
@@ -1473,7 +1474,9 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id, 
             
             # Upscale
             # We don't pass status_msg to prevent floodwaits during parallel processing
-            success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, None, "", model=model)
+            def prog_cb(text):
+                chunk_progress[i] = text
+            success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, None, "", model=model, progress_callback=prog_cb)
             if not success:
                 logger.error(f"Chunk {i} failed: {err_msg}")
                 failed_chunks += 1
@@ -1498,11 +1501,14 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id, 
     async def update_status():
         while completed_chunks + failed_chunks < total:
             try:
+                prog_text = "\n".join([f"▶️ Chunk {k+1}: <code>{v}</code>" for k, v in chunk_progress.items() if v and not (final_chunks[k] or k < completed_chunks)])
+                if prog_text: prog_text = "\n\n<b>Live Progress:</b>\n" + prog_text
+                
                 await status_msg.edit_text(
                     f"⚙️ <b>Parallel Upscaling ({max_concurrent}x)...</b>\n"
                     f"✅ Completed: {completed_chunks}/{total}\n"
                     f"⏩ Skipped: {skipped}\n"
-                    f"❌ Failed: {failed_chunks}", 
+                    f"❌ Failed: {failed_chunks}{prog_text}", 
                     parse_mode=enums.ParseMode.HTML
                 )
             except Exception:
