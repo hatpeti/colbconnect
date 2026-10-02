@@ -1357,14 +1357,28 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
                 if current_frame - last_frame >= 1 or now - last_update > 8:
                     last_frame = current_frame
                     if clean:
-                        try:
+
+                        if progress_callback:
+
+                            progress_callback(clean)
+
+                        elif status_msg:
+
+                            try:
                             await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
                             last_update = now
                         except: pass
             else:
                 if now - last_update > 8:
                     if clean:
-                        try:
+
+                        if progress_callback:
+
+                            progress_callback(clean)
+
+                        elif status_msg:
+
+                            try:
                             await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
                             last_update = now
                         except: pass
