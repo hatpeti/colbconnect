@@ -1484,10 +1484,7 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id, 
                 await client.send_document(
                     chat_id=PRIVATE_DB_CHANNEL,
                     document=out_path,
-                    caption=f"🎬 4K Chunk |
-{basename}
-{chunk_tag}
-{WATERMARK}"
+                    caption=f"🎬 4K Chunk |\n{basename}\n{chunk_tag}\n{WATERMARK}"
                 )
                 logger.info(f"Uploaded {chunk_tag} to DB Channel.")
             except Exception as e:
@@ -1502,12 +1499,9 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id, 
         while completed_chunks + failed_chunks < total:
             try:
                 await status_msg.edit_text(
-                    f"⚙️ <b>Parallel Upscaling ({max_concurrent}x)...</b>
-"
-                    f"✅ Completed: {completed_chunks}/{total}
-"
-                    f"⏩ Skipped: {skipped}
-"
+                    f"⚙️ <b>Parallel Upscaling ({max_concurrent}x)...</b>\n"
+                    f"✅ Completed: {completed_chunks}/{total}\n"
+                    f"⏩ Skipped: {skipped}\n"
                     f"❌ Failed: {failed_chunks}", 
                     parse_mode=enums.ParseMode.HTML
                 )
