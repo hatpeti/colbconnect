@@ -1384,6 +1384,17 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
                             except: pass
 
     await proc.wait()
+    
+    if model not in ["anime4k", "cugan"]:
+        import shutil
+        basename = os.path.splitext(os.path.basename(input_path))[0]
+        actual_file = os.path.join(output_path, f"{basename}_out.mp4")
+        if os.path.exists(actual_file):
+            tmp_dir = output_path + "_dir"
+            os.rename(output_path, tmp_dir)
+            shutil.move(os.path.join(tmp_dir, f"{basename}_out.mp4"), output_path)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     return proc.returncode == 0 and os.path.exists(output_path), err_acc
 
 async def _encode_hevc_10bit(input_path, output_path):
