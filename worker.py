@@ -873,9 +873,9 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                     return
                 
                 logger.info(f"File downloaded successfully: {path} ({format_bytes(os.path.getsize(path))})")
-                if action in ("enhance4k", "enhance4kv3"):
+                if action in ("enhance4k", "enhance4kv3", "enhance4kanime4k", "enhance4kcugan"):
                     status_msg = await client.send_message(chat_id, "🔮 <b>Starting 4K Enhancement...</b>", parse_mode=enums.ParseMode.HTML)
-                    final_4k = await process_4k_enhancement(client, path, status_msg, task_id, model="v3" if action == "enhance4kv3" else "6B")
+                    final_4k = await process_4k_enhancement(client, path, status_msg, task_id, model=action.replace("enhance4k", "") if action != "enhance4k" else "6B")
                     if final_4k and os.path.exists(final_4k):
                         file_size = os.path.getsize(final_4k)
                         if file_size > MAX_FILE_SIZE:
@@ -943,10 +943,10 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                 if not cancel_flags.get(task_id):
                     for f in dl.files:
                         if (getattr(f, "selected", False) or "url" in t_data) and os.path.exists(str(f.path)):
-                            if action in ("enhance4k", "enhance4kv3"):
+                            if action in ("enhance4k", "enhance4kv3", "enhance4kanime4k", "enhance4kcugan"):
                                 # 4K Enhancement Pipeline
                                 status_msg = await client.send_message(chat_id, "🔮 <b>Starting 4K Enhancement...</b>", parse_mode=enums.ParseMode.HTML)
-                                final_4k = await process_4k_enhancement(client, str(f.path), status_msg, task_id, model="v3" if action == "enhance4kv3" else "6B")
+                                final_4k = await process_4k_enhancement(client, str(f.path), status_msg, task_id, model=action.replace("enhance4k", "") if action != "enhance4k" else "6B")
                                 if final_4k and os.path.exists(final_4k):
                                     file_size = os.path.getsize(final_4k)
                                     if file_size > MAX_FILE_SIZE:
@@ -1303,13 +1303,29 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
     """Run Real-ESRGAN inference on a single chunk with real-time progress"""
     import time
     import re
-    cmd = [
-        "python", "/content/Real-ESRGAN/inference_realesrgan_video.py",
-        "-n", "realesr-animevideov3" if model == "v3" else "RealESRGAN_x4plus_anime_6B",
-        "-i", input_path,
-        "-o", output_path,
-        "--outscale", "2" if model == "v3" else "4"
-    ]
+    if model == "anime4k":
+        cmd = [
+            "/content/anime4k/Anime4KCPP_CLI",
+            "-i", input_path,
+            "-o", output_path,
+            "-z", "2"
+        ]
+    elif model == "cugan":
+        cmd = [
+            "/content/realcugan/realcugan-ncnn-vulkan",
+            "-i", input_path,
+            "-o", output_path,
+            "-s", "2",
+            "-n", "2"
+        ]
+    else:
+        cmd = [
+            "python", "/content/Real-ESRGAN/inference_realesrgan_video.py",
+            "-n", "realesr-animevideov3" if model == "v3" else "RealESRGAN_x4plus_anime_6B",
+            "-i", input_path,
+            "-o", output_path,
+            "--outscale", "2" if model == "v3" else "4"
+        ]
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
