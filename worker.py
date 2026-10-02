@@ -1345,7 +1345,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
         text = line.decode('utf-8', errors='ignore')
         err_acc += text
         
-        if status_msg and ("%" in text or "it" in text):
+        if (status_msg or progress_callback) and ("%" in text or "it" in text):
             parts = text.split("\r")
             clean = parts[-1].strip() if parts else text.strip()
             
