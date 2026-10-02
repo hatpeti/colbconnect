@@ -1446,32 +1446,86 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id, 
     existing = await _find_completed_chunks(client, job_tag)
     skipped = 0
     
-    # Step 3: Upscale each chunk
-    final_chunks = []
-    for i, raw_chunk in enumerate(raw_chunks):
+    # Step 3: Upscale chunks (Parallel for lightweight models)
+    max_concurrent = 3 if model in ("v3", "anime4k") else (2 if model == "cugan" else 1)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
+    completed_chunks = 0
+    failed_chunks = 0
+    final_chunks = [None] * total
+    
+    async def process_single_chunk(i, raw_chunk):
+        nonlocal completed_chunks, failed_chunks, skipped
         chunk_tag = f"#{job_tag}_Chunk_{i:03d}"
         out_name = os.path.basename(raw_chunk).replace(".mp4", "_4k.mp4")
         out_path = os.path.join(upscaled_dir, out_name)
         
-        if chunk_tag in existing:
-            skipped += 1
-            await status_msg.edit_text(
-                f"⏩ <b>Chunk {i+1}/{total}</b> — already in DB! Downloading back...\n"
-                f"(Skipped: {skipped} | Remaining: {total - i - 1})",
-                parse_mode=enums.ParseMode.HTML
-            )
+        async with semaphore:
+            if chunk_tag in existing:
+                try:
+                    await client.download_media(existing[chunk_tag], file_name=out_path)
+                    skipped += 1
+                    completed_chunks += 1
+                    final_chunks[i] = out_path
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to download {chunk_tag} from DB: {e}")
+            
+            # Upscale
+            # We don't pass status_msg to prevent floodwaits during parallel processing
+            success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, None, "", model=model)
+            if not success:
+                logger.error(f"Chunk {i} failed: {err_msg}")
+                failed_chunks += 1
+                return False
+                
+            # Upload to DB channel
             try:
-                await client.download_media(existing[chunk_tag], file_name=out_path)
+                await client.send_document(
+                    chat_id=PRIVATE_DB_CHANNEL,
+                    document=out_path,
+                    caption=f"🎬 4K Chunk |
+{basename}
+{chunk_tag}
+{WATERMARK}"
+                )
+                logger.info(f"Uploaded {chunk_tag} to DB Channel.")
             except Exception as e:
-                logger.error(f"Failed to download chunk {i} from DB: {e}")
-                await status_msg.edit_text(f"⚠️ DB download failed for chunk {i+1}, re-processing...")
-                msg_text = f"⚠️ DB download failed for chunk {i+1}, re-processing..."
-                success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status_msg, msg_text, model=model)
-                if not success:
-                    err_snippet = safe_html(str(err_msg)[-800:]) if err_msg else "Unknown Error"
-                    await status_msg.edit_text(f"❌ Upscaling failed at chunk {i+1}.\n\n<b>Error details:</b>\n<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
-                    return None
-            final_chunks.append(out_path)
+                logger.error(f"Failed to upload {chunk_tag} to DB: {e}")
+                
+            completed_chunks += 1
+            final_chunks[i] = out_path
+            return True
+
+    # Start a background task to update status message periodically
+    async def update_status():
+        while completed_chunks + failed_chunks < total:
+            try:
+                await status_msg.edit_text(
+                    f"⚙️ <b>Parallel Upscaling ({max_concurrent}x)...</b>
+"
+                    f"✅ Completed: {completed_chunks}/{total}
+"
+                    f"⏩ Skipped: {skipped}
+"
+                    f"❌ Failed: {failed_chunks}", 
+                    parse_mode=enums.ParseMode.HTML
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+            
+    status_task = asyncio.create_task(update_status())
+    
+    # Run all chunks concurrently with semaphore limits
+    tasks = [process_single_chunk(i, chunk) for i, chunk in enumerate(raw_chunks)]
+    results = await asyncio.gather(*tasks)
+    
+    status_task.cancel()
+    
+    if not all(results):
+        await status_msg.edit_text("❌ Upscaling failed for some chunks. Please check logs.")
+        return None
             continue
         
         if task_id in ACTIVE_TASKS:
