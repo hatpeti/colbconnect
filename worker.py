@@ -1411,7 +1411,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
             shutil.move(os.path.join(tmp_dir, f"{basename}_out.mp4"), output_path)
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    return proc.returncode == 0 and os.path.exists(output_path), err_acc
+    return os.path.exists(output_path), err_acc
 
 async def _encode_hevc_10bit(input_path, output_path):
     """FFmpeg: Re-encode to 10-bit HEVC x265"""
