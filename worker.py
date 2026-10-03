@@ -1313,7 +1313,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
         bash_cmd = (
             f"mkdir -p '{tmp_in}' '{tmp_out}' && "
             f"ffmpeg -hide_banner -loglevel error -i '{input_path}' '{tmp_in}/%08d.jpg' && "
-            f"cd /content/realesrgan_vulkan && chmod +x realesrgan-ncnn-vulkan && ./realesrgan-ncnn-vulkan -i '{tmp_in}' -o '{tmp_out}' -n realesrgan-x4plus-anime -s 4 -f jpg && "
+            f"cd /content/realesrgan_vulkan && chmod +x realesrgan-ncnn-vulkan && ./realesrgan-ncnn-vulkan -i '{tmp_in}' -o '{tmp_out}' -n realesr-animevideov3 -s 4 -f jpg && "
             f"FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 '{input_path}') && "
             f"ffmpeg -hide_banner -loglevel error -framerate $FPS -i '{tmp_out}/%08d.jpg' -i '{input_path}' -map 0:v -map 1:a? -c:v libx264 -crf 20 -c:a copy '{output_path}' && "
             f"rm -rf '{tmp_in}' '{tmp_out}'"
