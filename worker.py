@@ -585,7 +585,7 @@ def get_panel_markup(task_id):
          btn("1080p", f"panel_1080_{task_id}", style=enums.ButtonStyle.PRIMARY)],
         [btn("🔮 4K (6B)", f"panel_enhance4k_{task_id}", style=enums.ButtonStyle.SUCCESS),
          btn("⚡ 4K (v3)", f"panel_enhance4kv3_{task_id}", style=enums.ButtonStyle.SUCCESS)],
-        [btn("🚀 4K (Video2X)", f"panel_enhance4kvideo2x_{task_id}", style=enums.ButtonStyle.SUCCESS),
+        [btn("🌸 4K (Anime4K)", f"panel_enhance4kanime4k_{task_id}", style=enums.ButtonStyle.SUCCESS),
          btn("🎭 4K (CUGAN)", f"panel_enhance4kcugan_{task_id}", style=enums.ButtonStyle.SUCCESS)],
          [btn("🎭 4K (NCNN-Vulkan)", f"panel_enhance4kvulkan_{task_id}", style=enums.ButtonStyle.SUCCESS)],
         [btn("✂️ Remove Sub", f"panel_removesub_{task_id}", style=enums.ButtonStyle.DEFAULT),
