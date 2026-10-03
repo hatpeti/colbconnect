@@ -1,5 +1,6 @@
 import asyncio
 import os
+BASE_DIR = '/kaggle/working' if os.path.exists('/kaggle/working') else '/content'
 import websockets
 import json
 import random
@@ -1308,7 +1309,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
     import time
     import re
     if model == "video2x":
-        bash_cmd = f"export PATH=/content/realesrgan_vulkan:$PATH && video2x -i '{input_path}' -o '{output_path}' -p realesrgan -s 4 --realesrgan-model realesr-animevideov3 1>&2"
+        bash_cmd = f"export PATH={BASE_DIR}/realesrgan_vulkan:$PATH && video2x -i '{input_path}' -o '{output_path}' -p realesrgan -s 4 --realesrgan-model realesr-animevideov3 1>&2"
         cmd = ["bash", "-c", bash_cmd]
     elif model == "cugan":
         tmp_in = output_path + "_tmp_in"
@@ -1316,7 +1317,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
         bash_cmd = (
             f"mkdir -p '{tmp_in}' '{tmp_out}' && "
             f"ffmpeg -hide_banner -loglevel error -i '{input_path}' '{tmp_in}/%08d.jpg' && "
-            f"cd /content/realcugan && chmod +x realcugan-ncnn-vulkan && ./realcugan-ncnn-vulkan -i '{tmp_in}' -o '{tmp_out}' -s 2 -n 2 -f jpg && "
+            f"cd {BASE_DIR}/realcugan && chmod +x realcugan-ncnn-vulkan && ./realcugan-ncnn-vulkan -i '{tmp_in}' -o '{tmp_out}' -s 2 -n 2 -f jpg && "
             f"FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 '{input_path}') && "
             f"ffmpeg -hide_banner -loglevel error -framerate $FPS -i '{tmp_out}/%08d.jpg' -i '{input_path}' -map 0:v -map 1:a? -c:v libx264 -crf 20 -c:a copy '{output_path}' && "
             f"rm -rf '{tmp_in}' '{tmp_out}'"
@@ -1328,7 +1329,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
         bash_cmd = (
             f"mkdir -p '{tmp_in}' '{tmp_out}' && "
             f"ffmpeg -hide_banner -loglevel error -i '{input_path}' '{tmp_in}/%08d.jpg' && "
-            f"cd /content/realesrgan_vulkan && chmod +x realesrgan-ncnn-vulkan && ./realesrgan-ncnn-vulkan -i '{tmp_in}' -o '{tmp_out}' -n realesrgan-x4plus-anime -s 4 -f jpg && "
+            f"cd {BASE_DIR}/realesrgan_vulkan && chmod +x realesrgan-ncnn-vulkan && ./realesrgan-ncnn-vulkan -i '{tmp_in}' -o '{tmp_out}' -n realesrgan-x4plus-anime -s 4 -f jpg && "
             f"FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 '{input_path}') && "
             f"ffmpeg -hide_banner -loglevel error -framerate $FPS -i '{tmp_out}/%08d.jpg' -i '{input_path}' -map 0:v -map 1:a? -c:v libx264 -crf 20 -c:a copy '{output_path}' && "
             f"rm -rf '{tmp_in}' '{tmp_out}'"
@@ -1336,7 +1337,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
         cmd = ["bash", "-c", bash_cmd]
     else:
         cmd = [
-            "python", "/content/Real-ESRGAN/inference_realesrgan_video.py",
+            "python", f"{BASE_DIR}/Real-ESRGAN/inference_realesrgan_video.py",
             "-n", "realesr-animevideov3" if model == "v3" else "RealESRGAN_x4plus_anime_6B",
             "-i", input_path,
             "-o", output_path,
