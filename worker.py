@@ -1308,7 +1308,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
     import time
     import re
     if model == "video2x":
-        bash_cmd = f"export PATH=$PATH:/content/realesrgan_vulkan && video2x -i '{input_path}' -o '{output_path}' -p realesrgan -s 4 --realesrgan-model realesr-animevideov3 1>&2"
+        bash_cmd = f"export PATH=/content/realesrgan_vulkan:$PATH && video2x -i '{input_path}' -o '{output_path}' -p realesrgan -s 4 --realesrgan-model realesr-animevideov3 1>&2"
         cmd = ["bash", "-c", bash_cmd]
     elif model == "cugan":
         tmp_in = output_path + "_tmp_in"
