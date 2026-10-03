@@ -587,726 +587,727 @@ def get_panel_markup(task_id):
          btn("⚡ 4K (v3)", f"panel_enhance4kv3_{task_id}", style=enums.ButtonStyle.SUCCESS)],
         [btn("🚀 4K (Video2X)", f"panel_enhance4kvideo2x_{task_id}", style=enums.ButtonStyle.SUCCESS),
          btn("🎭 4K (CUGAN)", f"panel_enhance4kcugan_{task_id}", style=enums.ButtonStyle.SUCCESS)],
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+         [btn("🎭 4K (NCNN-Vulkan)", f"panel_enhance4kvulkan_{task_id}", style=enums.ButtonStyle.SUCCESS)],
+        [btn("✂️ Remove Sub", f"panel_removesub_{task_id}", style=enums.ButtonStyle.DEFAULT),
+         btn("📝 Add Sub", f"panel_addsub_{task_id}", style=enums.ButtonStyle.DEFAULT),
+         btn("🔍 Extract Sub", f"panel_extract_sub_{task_id}", style=enums.ButtonStyle.DEFAULT)],
+        [btn("🎵 Extract Audio", f"panel_extract_audio_{task_id}", style=enums.ButtonStyle.DEFAULT),
+         btn("✏️ Rename", f"panel_rename_{task_id}", style=enums.ButtonStyle.SUCCESS)],
+        [btn("🔄 Re-encode All", f"panel_reencode_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("🚀 Upload Now", f"panel_upload_{task_id}", style=enums.ButtonStyle.SUCCESS)],
+        [btn("❌ Cancel", f"panel_cancel_{task_id}", style=enums.ButtonStyle.DANGER)]
+    ])
+
+# Sinhala Help Menu
+async def testdb_cmd(client, message):
+    try:
+        await client.send_message(PRIVATE_DB_CHANNEL, "✅ <b>Test Message:</b> DB Channel Connection is Working!", parse_mode=enums.ParseMode.HTML)
+        await message.reply_text("✅ Message sent to DB Channel successfully!")
+    except Exception as e:
+        await message.reply_text(f"❌ Failed to send to DB Channel: {e}")
+
+async def help_cmd(client, message):
+    text = (
+        "<b>📚 Super Encoder & Leech Bot Help Menu</b>\n\n"
+        "<b>📥 ටොරන්ට් භාගත කිරීම:</b>\n"
+        "<code>/leech &lt;magnet_link&gt;</code> - Torrent එකක් භාගත කර File list එක ලබා ගෙන අවශ්‍ය files තෝරාගැනීමට.\n\n"
+        "<b>🎨 Encoding Panel Commands:</b>\n"
+        "පහත Commands ඔයාට Panel එකේ බොත්තම් විදියට වගේම, කෙලින්ම <b>වීඩියෝ එකකට Reply කරලත්</b> පාවිච්චි කරන්න පුළුවන්.\n\n"
+        "<b>🎬 Video Resolutions:</b>\n"
+        "<code>/480</code> - 480p වලට Convert කිරීම.\n"
+        "<code>/720</code> - 720p වලට Convert කිරීම.\n"
+        "<code>/1080</code> - 1080p වලට Convert කිරීම.\n"
+        "<code>/reencode</code> - 480p, 720p, 1080p සහ Original එකත් එක්ක File 4ක්ම ලබා දීම.\n\n"
+        "<b>✂️ Subtitles:</b>\n"
+        "<code>/removesub</code> - Soft subtitles අයින් කිරීම.\n"
+        "<code>/addsub</code> - Subtitle එකතු කිරීම (වීඩියෝ එකකට subtitle file එකක් reply කරන්න).\n"
+        "<code>/extract_sub</code> - Subtitle එක වෙනම ගලවාගැනීම.\n\n"
+        "<b>🎵 Audio:</b>\n"
+        "<code>/addaudio</code> - අලුත් Audio Track එකක් දැමීම.\n"
+        "<code>/extract_audio</code> - Audio එක වෙනම ගලවාගැනීම.\n"
+        "<code>/remaudio</code> - Audio Track එක අයින් කිරීම.\n\n"
+        "<b>🖼 Thumbnail:</b>\n"
+        "<code>/extract_thumb</code> - වීඩියෝ එකේ Thumbnail එක ගලවාගැනීම.\n\n"
+        "<b>🛑 Tasks නැවැත්වීම:</b>\n"
+        "<code>/cancel_&lt;task_id&gt;</code> - ඕනෑම ක්‍රියාවලියක් නතර කිරීමට."
+    )
+    await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+
+# --- PROCESS MEDIA PIPELINE (CONCURRENCY CONTROLLED) ---
+async def process_media_file(client, chat_id, filepath, action, custom_renames, file_index, task_id, sub_path=None, audio_path=None):
+    filename = os.path.basename(filepath)
+    if file_index in custom_renames:
+        new_filename = custom_renames[file_index]
+        new_filepath = os.path.join(os.path.dirname(filepath), new_filename)
+        os.rename(filepath, new_filepath)
+        filepath = new_filepath
+        filename = new_filename
+    
+    # 1. Apply MKV Watermark
+    filepath = await apply_mkv_watermark(filepath)
+    duration, w, h = await get_video_meta(filepath)
+    
+    files_to_upload = []
+    
+    # Generate requested qualities based on action
+    if action in ["480", "720", "1080", "reencode"]:
+        res_list = [int(action)] if action != "reencode" else [480, 720, 1080]
+        if action == "reencode": files_to_upload.append(filepath) # Keep original
+        
+        for res in res_list:
+            if cancel_flags.get(task_id): break
+            out_file = generate_res_name(filename, res) + ".mkv"
+            out_path = os.path.join(os.path.dirname(filepath), out_file)
+            success = await encode_video(filepath, out_path, res, duration, task_id, out_file)
+            if success:
+                out_path = await apply_mkv_watermark(out_path)
+                files_to_upload.append(out_path)
+    elif action == "removesub":
+        out_path = os.path.join(os.path.dirname(filepath), "nosub_" + filename)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-map", "0:v", "-map", "0:a?", "-c", "copy", out_path]
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "✂️ Removing Subs", filename)
+        if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "addsub" and sub_path:
+        out_path = os.path.join(os.path.dirname(filepath), "sub_" + filename)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-i", sub_path, "-c", "copy", "-c:s", "srt", "-metadata:s:s:0", f"title={WATERMARK}", out_path]
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "📝 Adding Subtitle", filename)
+        if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "extract_sub":
+        import json
+        proc = await asyncio.create_subprocess_exec("mkvmerge", "-J", filepath, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        stdout, _ = await proc.communicate()
+        sub_tracks = []
+        try:
+            info = json.loads(stdout)
+            for track in info.get("tracks", []):
+                if track.get("type") == "subtitles":
+                    codec = track.get("codec", "").lower()
+                    ext = ".srt" if "subrip" in codec else ".ass" if "substation" in codec else ".sup" if "pgs" in codec else ".vobsub" if "vobsub" in codec else ".srt"
+                    sub_tracks.append((track["id"], ext, track.get("properties", {}).get("language", "und")))
+        except Exception as e:
+            logger.error(f"Error parsing mkvmerge: {e}")
+            
+        if not sub_tracks:
+            await client.send_message(chat_id, f"⚠️ <b>No subtitles found</b> or file is not MKV: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
+        else:
+            base_name = os.path.splitext(filename)[0]
+            extract_args = []
+            extracted_files = []
+            for i, (tid, ext, lang) in enumerate(sub_tracks):
+                out_path = os.path.join(os.path.dirname(filepath), f"{base_name}_track{tid}_{lang}{ext}")
+                extract_args.extend([f"{tid}:{out_path}"])
+                extracted_files.append(out_path)
+                
+            cmd = ["mkvextract", "tracks", filepath] + extract_args
+            ex_proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await ex_proc.communicate()
+            
+            for out_path in extracted_files:
+                if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                    files_to_upload.append(out_path)
+                    
+            if not files_to_upload:
+                await client.send_message(chat_id, f"⚠️ <b>Failed to extract subtitles</b> from: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
+    elif action == "addaudio" and audio_path:
+        out_path = os.path.join(os.path.dirname(filepath), "audio_" + filename)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-i", audio_path, "-c", "copy", "-map", "0:v", "-map", "0:a?", "-map", "1:a", "-map", "0:s?", out_path]
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "🎵 Adding Audio", filename)
+        if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "extract_audio":
+        out_path = os.path.join(os.path.dirname(filepath), os.path.splitext(filename)[0] + ".aac")
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-vn", "-map", "0:a:0", "-c:a", "copy", out_path]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await proc.communicate()
+        if os.path.exists(out_path): files_to_upload.append(out_path)
+    elif action == "remaudio":
+        out_path = os.path.join(os.path.dirname(filepath), "noaudio_" + filename)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-map", "0:v", "-map", "0:s?", "-c", "copy", out_path]
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "🔇 Removing Audio", filename)
+        if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "extract_thumb":
+        out_path = os.path.join(os.path.dirname(filepath), os.path.splitext(filename)[0] + ".jpg")
+        cmd = ["ffmpeg", "-y", "-ss", "00:00:02", "-i", filepath, "-vframes", "1", out_path]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await proc.communicate()
+        if os.path.exists(out_path): files_to_upload.append(out_path)
+    else:
+        # Default upload (Upload Now)
+        files_to_upload.append(filepath)
+
+    # 2. Upload generated files as Documents (Force File) using Native Fast Upload
+    for f_path in files_to_upload:
+        if cancel_flags.get(task_id): break
+        f_name = os.path.basename(f_path)
+        f_size = os.path.getsize(f_path)
+        
+        start_time = time.time()
+        if task_id in ACTIVE_TASKS:
+            ACTIVE_TASKS[task_id].update({
+                "status": "📤 Uploading Document",
+                "filename": f_name,
+                "current": 0,
+                "total": f_size,
+                "is_time": False,
+                "start_time": start_time,
+                "speed": 0,
+                "eta": 0
+            })
+            
+        async def upload_progress(current, total):
+            if cancel_flags.get(task_id):
+                raise asyncio.CancelledError("Upload cancelled")
+            now = time.time()
+            elapsed = max(now - start_time, 0.001)
+            speed = current / elapsed
+            eta = max(total - current, 0) / speed if speed > 0 else 0
+            if task_id in ACTIVE_TASKS:
+                ACTIVE_TASKS[task_id].update({
+                    "current": current,
+                    "total": total,
+                    "speed": speed,
+                    "eta": eta
+                })
+
+        try:
+            thumb = CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None
+            msg = await upload_with_retry(client, chat_id, f_path, f_name, thumb, progress=upload_progress)
+            
+            # Automatically copy to Database Channel
+            if str(chat_id).lower() != TARGET_CHANNEL.lower() and msg:
+                try:
+                    await msg.copy(
+                        chat_id=TARGET_CHANNEL,
+                        caption=f"<code>{f_name}</code>",
+                        parse_mode=enums.ParseMode.HTML
+                    )
+                except Exception as e:
+                    logger.error(f"Error copying to channel {TARGET_CHANNEL}: {e}")
+                    if "CHAT_WRITE_FORBIDDEN" in str(e) or "CHANNEL_PRIVATE" in str(e):
+                        with contextlib.suppress(Exception):
+                            await client.send_message(
+                                chat_id,
+                                f"⚠️ <b>Database Warning:</b> Bot cannot post to <code>{TARGET_CHANNEL}</code>.\n"
+                                f"Please add the bot as an <b>Admin with 'Post Messages' permission</b> to the channel!",
+                                parse_mode=enums.ParseMode.HTML
+                            )
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Upload error for {f_name}: {e}")
+            with contextlib.suppress(Exception):
+                await client.send_message(
+                    chat_id,
+                    f"❌ <b>Upload Failed:</b> <code>{safe_html(f_name)}</code>\n"
+                    f"Error: <code>{safe_html(str(e)[:200])}</code>\n"
+                    f"🔄 Try sending the file again.",
+                    parse_mode=enums.ParseMode.HTML
+                )
+
+# --- EXECUTE TASK WORKER WITH SEMAPHORE ---
+async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, is_telegram_file=False, sub_path=None, audio_path=None, custom_renames=None):
+    if custom_renames is None: custom_renames = {}
+    async with TASK_SEMAPHORE:
+        try:
+            cancel_flags[task_id] = False
+            await ensure_status_message(chat_id)
+
+            if is_telegram_file and media_msg:
+                dl_dir = f"/content/dl_{task_id}"
+                os.makedirs(dl_dir, exist_ok=True)
+                file_name = getattr(media_msg.document or media_msg.video, "file_name", "downloaded.mkv")
+                path = os.path.join(dl_dir, file_name)
+
+                ACTIVE_TASKS[task_id] = {
+                    "task_id": task_id,
+                    "chat_id": chat_id,
+                    "user_mention": getattr(media_msg.from_user, "mention", "User") if media_msg.from_user else "User",
+                    "filename": file_name,
+                    "status": "📥 Downloading TG File",
+                    "current": 0,
+                    "total": getattr(media_msg.document or media_msg.video, "file_size", 100),
+                    "is_time": False,
+                    "start_time": time.time(),
+                    "speed": 0,
+                    "eta": 0
+                }
+
+                # Download progress callback
+                def tg_progress(current, total):
+                    if cancel_flags.get(task_id): raise asyncio.CancelledError
+                    now = time.time()
+                    elapsed = max(now - ACTIVE_TASKS[task_id]["start_time"], 0.001)
+                    ACTIVE_TASKS[task_id]["current"] = current
+                    ACTIVE_TASKS[task_id]["total"] = total
+                    ACTIVE_TASKS[task_id]["speed"] = current / elapsed
+                    ACTIVE_TASKS[task_id]["eta"] = (total - current) / ACTIVE_TASKS[task_id]["speed"] if ACTIVE_TASKS[task_id]["speed"] > 0 else 0
+
+                try:
+                    path = await download_with_retry(
+                        client, media_msg, file_name=path,
+                        chat_id=chat_id, msg_id=int(task_id),
+                        progress=tg_progress
+                    )
+                except Exception as dl_err:
+                    logger.error(f"Download failed for task {task_id}: {dl_err}")
+                    with contextlib.suppress(Exception):
+                        await client.send_message(
+                            chat_id,
+                            f"❌ <b>Download Failed:</b> <code>{safe_html(file_name)}</code>\n"
+                            f"Error: <code>{safe_html(str(dl_err)[:200])}</code>\n\n"
+                            f"💡 <i>Possible reasons:</i>\n"
+                            f"• Telegram server timeout (large file)\n"
+                            f"• Colab network issue\n"
+                            f"• File too large for current session\n\n"
+                            f"🔄 <b>Try again or use a smaller file.</b>",
+                            parse_mode=enums.ParseMode.HTML
+                        )
+                    shutil.rmtree(dl_dir, ignore_errors=True)
+                    return
+                
+                if not path or not os.path.exists(path):
+                    logger.error(f"Downloaded file not found for task {task_id}")
+                    with contextlib.suppress(Exception):
+                        await client.send_message(
+                            chat_id,
+                            f"❌ <b>Download Error:</b> File <code>{safe_html(file_name)}</code> was not saved properly.\n"
+                            f"🔄 <b>Please try again.</b>",
+                            parse_mode=enums.ParseMode.HTML
+                        )
+                    shutil.rmtree(dl_dir, ignore_errors=True)
+                    return
+                
+                logger.info(f"File downloaded successfully: {path} ({format_bytes(os.path.getsize(path))})")
+                if action in ("enhance4k", "enhance4kv3", "enhance4kvideo2x", "enhance4kcugan", "enhance4kvulkan"):
+                    status_msg = await client.send_message(chat_id, "🔮 <b>Starting 4K Enhancement...</b>", parse_mode=enums.ParseMode.HTML)
+                    final_4k = await process_4k_enhancement(client, path, status_msg, task_id, model=action.replace("enhance4k", "") if action != "enhance4k" else "6B")
+                    if final_4k and os.path.exists(final_4k):
+                        file_size = os.path.getsize(final_4k)
+                        if file_size > MAX_FILE_SIZE:
+                            await client.send_document(chat_id=PRIVATE_DB_CHANNEL, document=final_4k,
+                                caption=f"🎬 4K FINAL | {os.path.basename(final_4k)}\n#FINAL", force_document=True)
+                            await status_msg.edit_text("✅ <b>Done!</b> Final 4K video saved to DB Channel (too large for chat).")
+                        else:
+                            thumb = CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None
+                            await client.send_document(
+                                chat_id=chat_id, document=final_4k,
+                                caption=f"🎬 <b>{os.path.basename(final_4k)} — 4K Enhanced</b>\n10-bit HEVC x265 | Real-ESRGAN\n{WATERMARK}",
+                                parse_mode=enums.ParseMode.HTML, thumb=thumb, force_document=True
+                            )
+                            await status_msg.edit_text("✅ <b>4K Enhancement Complete!</b> 🎉", parse_mode=enums.ParseMode.HTML)
+                        if os.path.exists(final_4k): os.remove(final_4k)
+                else:
+                    await process_media_file(client, chat_id, path, action, custom_renames, 1, task_id, sub_path, audio_path)
+                shutil.rmtree(dl_dir, ignore_errors=True)
+
+            elif not is_telegram_file and task_id in current_tasks:
+                t_data = current_tasks.pop(task_id)
+                if not custom_renames: custom_renames = t_data.get("custom_renames", {})
+                dl_dir = f"/content/dl_{task_id}"
+                os.makedirs(dl_dir, exist_ok=True)
+                global aria2_api
+                
+                if "url" in t_data:
+                    dl = aria2_api.add_uris([t_data["url"]], options={"dir": dl_dir})
+                    dl_type = "URL"
+                else:
+                    dl = aria2_api.add_torrent(t_data["torrent"], options={"dir": dl_dir, "select-file": ",".join(map(str, t_data["selected"]))})
+                    dl_type = "Torrent"
+                
+                ACTIVE_TASKS[task_id] = {
+                    "task_id": task_id,
+                    "chat_id": chat_id,
+                    "user_mention": t_data.get("user_mention", "User"),
+                    "filename": t_data["t_name"],
+                    "status": f"📥 Downloading {dl_type}",
+                    "current": 0,
+                    "total": 1,
+                    "is_time": False,
+                    "start_time": time.time(),
+                    "speed": 0,
+                    "eta": 0
+                }
+
+                while dl.status not in ["complete", "error", "removed"]:
+                    await asyncio.sleep(2)
+                    dl.update()
+                    if cancel_flags.get(task_id):
+                        aria2_api.remove([dl], force=True, files=False)
+                        break
+                    if dl.total_length > 0:
+                        ACTIVE_TASKS[task_id].update({
+                            "current": dl.completed_length,
+                            "total": dl.total_length,
+                            "speed": dl.download_speed,
+                            "eta": dl.eta.total_seconds() if dl.eta else 0
+                        })
+                        if dl.completed_length >= dl.total_length:
+                            aria2_api.remove([dl], force=True, files=False)
+                            break
+                        
+                if not cancel_flags.get(task_id):
+                    for f in dl.files:
+                        if (getattr(f, "selected", False) or "url" in t_data) and os.path.exists(str(f.path)):
+                            if action in ("enhance4k", "enhance4kv3", "enhance4kvideo2x", "enhance4kcugan", "enhance4kvulkan"):
+                                # 4K Enhancement Pipeline
+                                status_msg = await client.send_message(chat_id, "🔮 <b>Starting 4K Enhancement...</b>", parse_mode=enums.ParseMode.HTML)
+                                final_4k = await process_4k_enhancement(client, str(f.path), status_msg, task_id, model=action.replace("enhance4k", "") if action != "enhance4k" else "6B")
+                                if final_4k and os.path.exists(final_4k):
+                                    file_size = os.path.getsize(final_4k)
+                                    if file_size > MAX_FILE_SIZE:
+                                        await client.send_document(chat_id=PRIVATE_DB_CHANNEL, document=final_4k,
+                                            caption=f"🎬 4K FINAL | {os.path.basename(final_4k)}\n#FINAL", force_document=True)
+                                        await status_msg.edit_text("✅ <b>Done!</b> Final 4K video saved to DB Channel (too large for chat).")
+                                    else:
+                                        thumb = CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None
+                                        await client.send_document(
+                                            chat_id=chat_id, document=final_4k,
+                                            caption=f"🎬 <b>{os.path.basename(final_4k)} — 4K Enhanced</b>\n10-bit HEVC x265 | Real-ESRGAN\n{WATERMARK}",
+                                            parse_mode=enums.ParseMode.HTML, thumb=thumb, force_document=True
+                                        )
+                                        await status_msg.edit_text("✅ <b>4K Enhancement Complete!</b> 🎉", parse_mode=enums.ParseMode.HTML)
+                                    if os.path.exists(final_4k): os.remove(final_4k)
+                            else:
+                                await process_media_file(client, chat_id, str(f.path), action, custom_renames, f.index, task_id)
+                shutil.rmtree(dl_dir, ignore_errors=True)
+
+        except asyncio.CancelledError:
+            logger.info(f"Task {task_id} was cancelled.")
+            with contextlib.suppress(Exception):
+                await client.send_message(chat_id, f"🛑 <b>Task cancelled.</b>", parse_mode=enums.ParseMode.HTML)
+        except Exception as e:
+            logger.error(f"Task {task_id} error: {e}")
+            with contextlib.suppress(Exception):
+                await client.send_message(
+                    chat_id,
+                    f"❌ <b>Task Error:</b>\n<code>{safe_html(str(e)[:300])}</code>\n\n🔄 <b>Please try again.</b>",
+                    parse_mode=enums.ParseMode.HTML
+                )
+        finally:
+            ACTIVE_TASKS.pop(task_id, None)
+            cancel_flags.pop(task_id, None)
+
+# --- TELEGRAM FILE HANDLER (PANEL TRIGGER FOR GROUPS & PRIVATE) ---
+async def handle_telegram_file(client, message):
+    try:
+        media = message.document or message.video
+        if not media: return
+        file_name = getattr(media, "file_name", None)
+        if not file_name:
+            if message.video: file_name = f"video_{message.id}.mp4"
+            else: file_name = f"file_{message.id}"
+        task_id = str(message.id)
+        
+        await message.reply_text(
+            f"<b>🎬 File Detected:</b>\n<code>{safe_html(file_name)}</code>\n\n"
+            "👉 <i>Choose an action from the Encoding Panel below:</i>",
+            reply_markup=get_panel_markup(task_id),
+            parse_mode=enums.ParseMode.HTML,
+            quote=True
+        )
+    except Exception as e:
+        logger.error(f"Error in handle_telegram_file: {e}")
+
+# --- PANEL & ENCODE COMMAND HANDLER (GREAT FOR GROUPS) ---
+async def panel_cmd(client, message):
+    try:
+        media_msg = message.reply_to_message
+        if not media_msg or not (media_msg.document or media_msg.video):
+            if message.document or message.video:
+                media_msg = message
+            else:
+                return await message.reply("👉 <i>Please reply to a video or file with <code>/panel</code> to open the Encoding Panel.</i>", parse_mode=enums.ParseMode.HTML)
+        
+        media = media_msg.document or media_msg.video
+        file_name = getattr(media, "file_name", None)
+        if not file_name:
+            if media_msg.video: file_name = f"video_{media_msg.id}.mp4"
+            else: file_name = f"file_{media_msg.id}"
+            
+        task_id = str(media_msg.id)
+        await message.reply_text(
+            f"<b>🎬 File Detected:</b>\n<code>{safe_html(file_name)}</code>\n\n"
+            "👉 <i>Choose an action from the Encoding Panel below:</i>",
+            reply_markup=get_panel_markup(task_id),
+            parse_mode=enums.ParseMode.HTML,
+            quote=True
+        )
+    except Exception as e:
+        logger.error(f"Error in panel_cmd: {e}")
+
+# --- LEECH COMMAND ---
+async def handle_leech(client, message):
+    if len(message.command) < 2:
+        return await message.reply("Please provide a magnet link! Example: <code>/leech magnet:?...</code>", parse_mode=enums.ParseMode.HTML)
+    magnet = message.command[1]
+    
+    status_msg = await message.reply("🔍 <i>Fetching torrent metadata...</i>", parse_mode=enums.ParseMode.HTML)
+    temp_dir = f"/content/meta_{message.id}"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    try:
+        cmd = ["aria2c", "--bt-metadata-only=true", "--bt-save-metadata=true", "--console-log-level=error", "--dir", temp_dir, magnet]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await proc.communicate()
+        
+        t_file = next((os.path.join(temp_dir, n) for n in os.listdir(temp_dir) if n.endswith(".torrent")), None)
+        if not t_file: return await status_msg.edit_text("❌ Failed to fetch torrent metadata.")
+        
+        global aria2_api
+        
+        # Make a copy of the .torrent file for metadata extraction so it doesn't get deleted
+        t_file_meta = t_file + ".meta.torrent"
+        import shutil
+        shutil.copy(t_file, t_file_meta)
+        
+        meta_dl = aria2_api.add_torrent(t_file_meta, options={"pause": "true"})
+        files, t_name = meta_dl.files, meta_dl.name
+        aria2_api.remove([meta_dl], force=True, files=False)
+        
+        tree_html = build_file_tree(files, True)
+        tree_txt = build_file_tree(files, False)
+        
+        caption = (f"✅ <b>Torrent Identified!</b>\n\n"
+                   f"👉 <b>Reply to this message</b> with file numbers to download.\n"
+                   f"Example: <code>1,3,5-7</code> (or <code>all</code> for everything)")
+        
+        if len(tree_html) > 3500:
+            txt_path = os.path.join(temp_dir, "file_list.txt")
+            with open(txt_path, "w") as f: f.write(tree_txt)
+            prompt = await message.reply_document(document=txt_path, caption=caption, parse_mode=enums.ParseMode.HTML)
+        else:
+            prompt = await message.reply_text(f"<b>Files:</b>\n{tree_html}\n\n{caption}", parse_mode=enums.ParseMode.HTML)
+            
+        task_id = str(prompt.id)
+        current_tasks[task_id] = {
+            "torrent": t_file,
+            "files": files,
+            "t_name": t_name,
+            "temp": temp_dir,
+            "user_mention": message.from_user.mention if message.from_user else "User"
+        }
+        await status_msg.delete()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
+
+# --- URL COMMAND ---
+async def handle_url(client, message):
+    if len(message.command) < 2:
+        return await message.reply("Please provide a direct URL! Example: <code>/url https://domain.com/video.mkv</code>", parse_mode=enums.ParseMode.HTML)
+    url = message.command[1]
+    
+    file_name = url.split("/")[-1].split("?")[0]
+    if not file_name or len(file_name) < 3: file_name = "downloaded_video.mkv"
+    
+    task_id = str(message.id)
+    current_tasks[task_id] = {
+        "url": url,
+        "t_name": file_name,
+        "user_mention": message.from_user.mention if message.from_user else "User"
+    }
+    
+    await message.reply_text(
+        f"<b>🔗 URL Detected:</b>\n<code>{safe_html(url)}</code>\n\n"
+        "👉 <i>Choose an action from the Encoding Panel below:</i>",
+        reply_markup=get_panel_markup(task_id),
+        parse_mode=enums.ParseMode.HTML,
+        quote=True
+    )
+
+# --- THUMBNAIL HANDLER ---
+async def save_thumbnail(client, message):
+    if message.photo:
+        status = await message.reply("🖼️ <i>Downloading thumbnail...</i>", parse_mode=enums.ParseMode.HTML)
+        try:
+            await message.download(file_name=CUSTOM_THUMB_PATH)
+            await status.edit_text("✅ <b>Custom thumbnail saved successfully!</b>\nIt will be used for all future uploads.", parse_mode=enums.ParseMode.HTML)
+        except Exception as e:
+            await status.edit_text(f"❌ <b>Error saving thumbnail:</b>\n{e}", parse_mode=enums.ParseMode.HTML)
+
+# --- REPLY COMMANDS & FILE SELECTION ---
+async def reply_handler(client, message):
+    if not message.reply_to_message: return
+    r_id = str(message.reply_to_message.id)
+    raw_text = (message.text or message.caption or "").strip()
+    text = raw_text.lower()
+    # Check pending rename reply
+    if r_id in pending_renames:
+        r_data = pending_renames.pop(r_id)
+        new_name = raw_text
+        task_id = r_data["task_id"]
+        
+        if r_data["is_tg"]:
+            media_msg = r_data["media_msg"]
+            asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, "upload", media_msg=media_msg, is_telegram_file=True, custom_renames={1: new_name}))
+        else:
+            if task_id in current_tasks:
+                if "custom_renames" not in current_tasks[task_id]:
+                    current_tasks[task_id]["custom_renames"] = {}
+                sel = current_tasks[task_id]["selected"]
+                if len(sel) == 1:
+                    current_tasks[task_id]["custom_renames"][sel[0]] = new_name
+                await message.reply("✅ <b>File renamed!</b> Choose action from panel.", parse_mode=enums.ParseMode.HTML)
+        return
+
+    # Check pending subtitle reply
+    if r_id in pending_sub_replies and (message.document or message.video):
+        media_msg = pending_sub_replies.pop(r_id)
+        sub_dir = f"/content/sub_{message.id}"
+        os.makedirs(sub_dir, exist_ok=True)
+        sub_path = await client.download_media(message, file_name=sub_dir + "/")
+        task_id = str(message.id)
+        asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, "addsub", media_msg=media_msg, is_telegram_file=True, sub_path=sub_path))
+        return
+
+    # Check pending audio reply
+    if r_id in pending_audio_replies and (message.audio or message.document):
+        media_msg = pending_audio_replies.pop(r_id)
+        aud_dir = f"/content/aud_{message.id}"
+        os.makedirs(aud_dir, exist_ok=True)
+        aud_path = await client.download_media(message, file_name=aud_dir + "/")
+        task_id = str(message.id)
+        asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, "addaudio", media_msg=media_msg, is_telegram_file=True, audio_path=aud_path))
+        return
+
+    # 1. Torrent File Selection
+    if r_id in current_tasks:
+        task_data = current_tasks.pop(r_id)
+        selected = parse_selection(text, len(task_data["files"]))
+        if not selected: return await message.reply("❌ Invalid file selection. Please enter numbers like <code>1,2,3</code> or <code>all</code>.", parse_mode=enums.ParseMode.HTML)
+        
+        task_data["selected"] = selected
+        new_task_id = str(message.id)
+        current_tasks[new_task_id] = task_data
+        
+        await message.reply_text(
+            f"✅ <b>Files Selected!</b> Choose an action from the Encoding Panel:",
+            reply_markup=get_panel_markup(new_task_id),
+            parse_mode=enums.ParseMode.HTML,
+            quote=True
+        )
+        return
+        
+    # 2. Direct Reply Commands on Media (/480, /removesub, /extract_sub, etc.)
+    if message.reply_to_message.document or message.reply_to_message.video:
+        if text.startswith("/"):
+            action = text.replace("/", "").split()[0].replace(f"@{client.me.username}" if client.me else "", "")
+            
+            if action == "addsub":
+                prompt = await message.reply("📝 <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
+                pending_sub_replies[str(prompt.id)] = message.reply_to_message
+                return
+            elif action == "addaudio":
+                prompt = await message.reply("🎵 <b>Please reply to THIS message with your audio file (.aac, .m4a, .mp3, etc.)</b>", parse_mode=enums.ParseMode.HTML)
+                pending_audio_replies[str(prompt.id)] = message.reply_to_message
+                return
+            elif action in ["480", "720", "1080", "reencode", "removesub", "extract_sub", "extract_audio", "remaudio", "extract_thumb", "enhance4k"]:
+                task_id = str(message.id)
+                asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, action, media_msg=message.reply_to_message, is_telegram_file=True))
+
+# --- PANEL CALLBACKS ---
+async def cb_handler(client, cb):
+    data = cb.data
+    if data.startswith("panel_"):
+        action = data[len("panel_"):].rsplit("_", 1)[0]
+        task_id = data.rsplit("_", 1)[1]
+        
+        if action == "cancel":
+            cancel_flags[task_id] = True
+            return await cb.message.edit_text("🚫 <b>Task cancelled.</b>", parse_mode=enums.ParseMode.HTML)
+        
+        # ALWAYS fetch the full original message to ensure media data is available
+        # callback query's reply_to_message often doesn't contain document/video data
+        media_target = None
+        try:
+            media_target = await client.get_messages(cb.message.chat.id, int(task_id))
+            if media_target and not (media_target.document or media_target.video):
+                logger.warning(f"get_messages({task_id}): message found but no media, trying reply_to_message")
+                media_target = None
+        except Exception as e:
+            logger.warning(f"get_messages({task_id}) failed: {e}")
+        
+        # Fallback to reply_to_message
+        if not media_target:
+            media_target = cb.message.reply_to_message
+        
+        if action == "addsub":
+            await cb.message.edit_reply_markup(None)
+            prompt = await cb.message.reply("📝 <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
+            pending_sub_replies[str(prompt.id)] = media_target
+            return
+
+        if action == "rename":
+            await cb.message.edit_reply_markup(None)
+            prompt = await cb.message.reply("✏️ <b>Please reply to THIS message with the NEW NAME (with extension, e.g. video.mkv):</b>", parse_mode=enums.ParseMode.HTML)
+            is_tg = (task_id not in current_tasks)
+            pending_renames[str(prompt.id)] = {"task_id": task_id, "is_tg": is_tg, "media_msg": media_target}
+            return
+
+        await cb.message.edit_reply_markup(None)
+        is_tg = (task_id not in current_tasks)
+        
+        # Final validation: make sure we have a valid media message
+        if is_tg and (not media_target or not (media_target.document or media_target.video)):
+            logger.error(f"No valid media found for task {task_id}")
+            await cb.message.reply(
+                "❌ <b>Error:</b> Could not find the original file message.\n"
+                "🔄 <b>Please re-send the video and try again.</b>",
+                parse_mode=enums.ParseMode.HTML
+            )
+            return
+        
+        logger.info(f"Starting task {task_id}: action={action}, is_tg={is_tg}, "
+                     f"has_doc={bool(media_target and media_target.document)}, "
+                     f"has_vid={bool(media_target and media_target.video)}")
+        asyncio.create_task(execute_task_worker(client, cb.message.chat.id, task_id, action, media_msg=media_target, is_telegram_file=is_tg))
+
+# --- CANCEL COMMAND ---
+async def cancel_cmd(client, message):
+    cmd_text = message.text.strip()
+    task_id = None
+    if "_" in cmd_text:
+        task_id = cmd_text.split("_", 1)[1].split()[0]
+    elif len(message.command) > 1:
+        task_id = message.command[1]
+        
+    if task_id and (task_id in ACTIVE_TASKS or task_id in cancel_flags):
+        cancel_flags[task_id] = True
+        await message.reply(f"🛑 <b>Task <code>{task_id}</code> is stopping...</b>", parse_mode=enums.ParseMode.HTML)
+    else:
+        await message.reply("❌ Task not found or already finished.")
+
+# ============================================================
+# --- 4K REAL-ESRGAN ENHANCEMENT SYSTEM (Auto-Resume) ---
+# ============================================================
+
+async def _run_shell(cmd):
+    """Run a shell command asynchronously"""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+    return proc.returncode, stdout.decode(errors='ignore'), stderr.decode(errors='ignore')
+
+async def _split_video_to_chunks(input_video, output_dir, segment_seconds=60):
+    """FFmpeg: Split video into N-second segments"""
+    os.makedirs(output_dir, exist_ok=True)
+    basename = os.path.splitext(os.path.basename(input_video))[0]
+    pattern = os.path.join(output_dir, f"{basename}_chunk_%03d.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-i", input_video,
+        "-c", "copy", "-f", "segment",
+        "-segment_time", str(segment_seconds),
+        "-reset_timestamps", "1", pattern
+    ]
+    await _run_shell(cmd)
+    return sorted(glob.glob(os.path.join(output_dir, f"{basename}_chunk_*.mp4")))
+
+async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, prefix_text="", model="6B", progress_callback=None):
+    """Run Real-ESRGAN inference on a single chunk with real-time progress"""
+    import time
+    import re
+    if model == "video2x":
         cmd = ["video2x", "--input", input_path, "--output", output_path, "--processor", "realesrgan", "--realesrgan-model", "realesr-animevideov3", "--scaling-factor", "4"]
     elif model == "cugan":
         tmp_in = output_path + "_tmp_in"
@@ -1333,40 +1334,38 @@ def get_panel_markup(task_id):
         )
         cmd = ["bash", "-c", bash_cmd]
     else:
-
-
+        cmd = [
             "python", "/content/Real-ESRGAN/inference_realesrgan_video.py",
-
-
+            "-n", "realesr-animevideov3" if model == "v3" else "RealESRGAN_x4plus_anime_6B",
             "-i", input_path,
-
-
+            "-o", output_path,
             "--outscale", "2" if model == "v3" else "4"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    
+    last_update = time.time()
+    last_frame = 0
+    err_acc = ""
+    while True:
+        line = await proc.stderr.read(1024)
+        if not line:
+            break
+        text = line.decode('utf-8', errors='ignore')
+        err_acc += text
+        
+        if (status_msg or progress_callback) and ("%" in text or "it" in text):
+            parts = text.split("\r")
+            clean = parts[-1].strip() if parts else text.strip()
+            
+            # Extract frame number like "23/1440"
+            matches = re.findall(r'(\d+)/\d+', text)
             match = re.search(r'(\d+)/\d+', clean) if not matches else True
-                clean = text.strip()  # preserve text for display
+            if matches:
+                clean = text.strip()
             now = time.time()
             if match:
                 current_frame = int(matches[-1]) if "matches" in locals() and matches else int(match.group(1))
@@ -1374,9 +1373,11 @@ def get_panel_markup(task_id):
                     last_frame = current_frame
                     if clean:
 
+                        if progress_callback:
 
                             progress_callback(clean)
 
+                        elif status_msg:
 
                             try:
                                 await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
@@ -1386,9 +1387,11 @@ def get_panel_markup(task_id):
                 if now - last_update > 8:
                     if clean:
 
+                        if progress_callback:
 
                             progress_callback(clean)
 
+                        elif status_msg:
 
                             try:
                                 await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
