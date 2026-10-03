@@ -1416,7 +1416,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
 
     await proc.wait()
     
-    if model not in ["anime4k", "cugan"]:
+    if model not in ["anime4k", "cugan", "video2x", "vulkan"]:
         import shutil
         basename = os.path.splitext(os.path.basename(input_path))[0]
         actual_file = os.path.join(output_path, f"{basename}_out.mp4")
