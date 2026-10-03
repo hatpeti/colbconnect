@@ -1362,9 +1362,10 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
             parts = text.split("\r")
             clean = parts[-1].strip() if parts else text.strip()
             
-            # Extract frame number like "23/1440"
+            # Extract frame number like "23/1440" or percentage like "48.33%"
             matches = re.findall(r'(\d+)/\d+', text)
             match = re.search(r'(\d+)/\d+', clean) if not matches else True
+            pct_match = re.search(r'(\d+\.\d+)%', clean)
             if matches:
                 clean = text.strip()
             now = time.time()
@@ -1373,27 +1374,41 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
                 if current_frame - last_frame >= 1 or now - last_update > 8:
                     last_frame = current_frame
                     if clean:
-
                         if progress_callback:
-
                             progress_callback(clean)
-
                         elif status_msg:
-
                             try:
                                 await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
                                 last_update = now
                             except: pass
+            elif pct_match:
+                pct = float(pct_match.group(1))
+                elapsed = now - (last_frame if last_frame > 100000 else time.time() - 1)  # Hack: use last_frame as start_time if it's large
+                if last_frame < 100000: last_frame = now  # Initialize start_time in last_frame
+                
+                if pct > 0.1 and now - last_update > 3:
+                    total_time_est = (now - last_frame) / (pct / 100.0)
+                    rem_time = max(0, total_time_est - (now - last_frame))
+                    rem_mins = int(rem_time // 60)
+                    rem_secs = int(rem_time % 60)
+                    
+                    frames_est = int((pct / 100.0) * 192)
+                    
+                    formatted_clean = f"[Kframe={frames_est}/192 ({pct:.2f}%); remaining={rem_mins:02d}:{rem_secs:02d}]"
+                    
+                    if progress_callback:
+                        progress_callback(formatted_clean)
+                    elif status_msg:
+                        try:
+                            await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{formatted_clean}</code>", parse_mode=enums.ParseMode.HTML)
+                            last_update = now
+                        except: pass
             else:
                 if now - last_update > 8:
                     if clean:
-
                         if progress_callback:
-
                             progress_callback(clean)
-
                         elif status_msg:
-
                             try:
                                 await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
                                 last_update = now
