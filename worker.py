@@ -1308,7 +1308,7 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
     import time
     import re
     if model == "video2x":
-        if BASE_DIR == '/kaggle/working':
+        if '/content' == '/kaggle/working':
             # Kaggle: video2x .deb crashes kernel (Exit 137), use NCNN bash script instead
             tmp_in = output_path + "_tmp_in"
             tmp_out = output_path + "_tmp_out"
