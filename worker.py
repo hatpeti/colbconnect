@@ -275,12 +275,12 @@ async def download_with_retry(client, message, file_name, chat_id=None, msg_id=N
             await asyncio.sleep(wait)
         except Exception as e:
             last_error = e
-            logger.warning(f"❌ Download attempt {attempt}/{max_retries} failed: {e}")
+            logger.warning(f"�?� Download attempt {attempt}/{max_retries} failed: {e}")
             if attempt == max_retries:
                 break
             # Longer backoff to let DC5 cooldown: 30s, 60s, 120s, 180s, 180s...
             wait_time = min(30 * (2 ** (attempt - 1)), 180)
-            logger.info(f"⏳ Waiting {wait_time}s before retry (fresh session + file_reference)...")
+            logger.info(f"�?� Waiting {wait_time}s before retry (fresh session + file_reference)...")
             await asyncio.sleep(wait_time)
     raise Exception(f"Download failed after {max_retries} attempts. Last error: {last_error}")
 
@@ -357,7 +357,7 @@ def build_file_tree(files, is_html=True):
             child_prefix = "    " if is_last_item else "│   "
             val = node[key]
             if isinstance(val, dict) and 'index' not in val:
-                lines.append(f"{prefix}{connector}📁 {html.escape(key) if is_html else key}")
+                lines.append(f"{prefix}{connector}�? {html.escape(key) if is_html else key}")
                 lines.extend(render_tree(val, prefix + child_prefix))
             else:
                 idx_str = f"[{val['index']}]"
@@ -371,7 +371,7 @@ async def ensure_status_message(chat_id):
     if chat_id in STATUS_MESSAGES:
         return STATUS_MESSAGES[chat_id]
     try:
-        msg = await app.send_message(chat_id, "⏳ <b>Starting task...</b>", parse_mode=enums.ParseMode.HTML)
+        msg = await app.send_message(chat_id, "�?� <b>Starting task...</b>", parse_mode=enums.ParseMode.HTML)
         STATUS_MESSAGES[chat_id] = msg
         return msg
     except Exception as e:
@@ -558,19 +558,27 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, tas
         raise Exception(f"FFMPEG Failed:\n{err.decode('utf-8', errors='ignore')[-1000:]}")
     return os.path.exists(output_path)
 
-async def encode_video(input_path, output_path, resolution, total_duration, task_id, filename):
+async def encode_video(input_path, output_path, resolution, total_duration, task_id, filename, hevc_10bit=False):
     has_nvenc = check_gpu()
-    if resolution == 1080: scale, cq, crf = "scale=-2:'min(1080,ih)'", "30", "28"
+    if resolution == 2160: scale, cq, crf = "scale=-2:'min(2160,ih)'", "26", "24"
+    elif resolution == 1080: scale, cq, crf = "scale=-2:'min(1080,ih)'", "30", "28"
     elif resolution == 720: scale, cq, crf = "scale=-2:'min(720,ih)'", "34", "32"
     else: scale, cq, crf = "scale=-2:'min(480,ih)'", "38", "36"
 
-    if has_nvenc:
-        vcodec = ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-cq", cq, "-pix_fmt", "yuv420p"]
-        action = f"⚙️ Encoding {resolution}p (GPU)"
+    if hevc_10bit:
+        if has_nvenc:
+            vcodec = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", cq, "-pix_fmt", "p010le"]
+            action = f"⚙️ Encoding {resolution}p HEVC 10b (GPU)"
+        else:
+            vcodec = ["-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p10le"]
+            action = f"⚙️ Encoding {resolution}p HEVC 10b (CPU)"
     else:
-        vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
-        action = f"⚙️ Encoding {resolution}p (CPU)"
-
+        if has_nvenc:
+            vcodec = ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-cq", cq, "-pix_fmt", "yuv420p"]
+            action = f"⚙️ Encoding {resolution}p (GPU)"
+        else:
+            vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
+            action = f"⚙️ Encoding {resolution}p (CPU)"
     cmd = ["ffmpeg", "-y", "-hwaccel", "auto", "-i", input_path, "-vf", scale, *vcodec, "-c:a", "copy", "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?", "-map_chapters", "0", "-c:s", "copy", "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path]
     return await run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action, filename)
 
@@ -582,20 +590,22 @@ def get_panel_markup(task_id):
     return InlineKeyboardMarkup([
         [btn("480p", f"panel_480_{task_id}", style=enums.ButtonStyle.PRIMARY),
          btn("720p", f"panel_720_{task_id}", style=enums.ButtonStyle.PRIMARY),
-         btn("1080p", f"panel_1080_{task_id}", style=enums.ButtonStyle.PRIMARY)],
-        [btn("🔮 4K (6B)", f"panel_enhance4k_{task_id}", style=enums.ButtonStyle.SUCCESS),
-         btn("⚡ 4K (v3)", f"panel_enhance4kv3_{task_id}", style=enums.ButtonStyle.SUCCESS)],
-        [btn("🚀 4K (Video2X)", f"panel_enhance4kvideo2x_{task_id}", style=enums.ButtonStyle.SUCCESS),
-         btn("🎭 4K (CUGAN)", f"panel_enhance4kcugan_{task_id}", style=enums.ButtonStyle.SUCCESS)],
-         [btn("🎭 4K (NCNN-Vulkan)", f"panel_enhance4kvulkan_{task_id}", style=enums.ButtonStyle.SUCCESS)],
-        [btn("✂️ Remove Sub", f"panel_removesub_{task_id}", style=enums.ButtonStyle.DEFAULT),
-         btn("📝 Add Sub", f"panel_addsub_{task_id}", style=enums.ButtonStyle.DEFAULT),
-         btn("🔍 Extract Sub", f"panel_extract_sub_{task_id}", style=enums.ButtonStyle.DEFAULT)],
+         btn("1080p", f"panel_1080_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("2160p", f"panel_2160_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+        [btn("480p HEVC 10b", f"panel_480hevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("720p HEVC 10b", f"panel_720hevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("1080p HEVC 10b", f"panel_1080hevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("2160p HEVC 10b", f"panel_2160hevc_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+        [btn("🔮 4K Enhance", f"panel_enhance4k_{task_id}", style=enums.ButtonStyle.SUCCESS)],
+        [btn("✂�? Remove Sub", f"panel_removesub_{task_id}", style=enums.ButtonStyle.DEFAULT),
+         btn("�? Add Sub", f"panel_addsub_{task_id}", style=enums.ButtonStyle.DEFAULT),
+         btn("�? Extract Sub", f"panel_extract_sub_{task_id}", style=enums.ButtonStyle.DEFAULT)],
         [btn("🎵 Extract Audio", f"panel_extract_audio_{task_id}", style=enums.ButtonStyle.DEFAULT),
-         btn("✏️ Rename", f"panel_rename_{task_id}", style=enums.ButtonStyle.SUCCESS)],
+         btn("�?�? Rename", f"panel_rename_{task_id}", style=enums.ButtonStyle.SUCCESS)],
         [btn("🔄 Re-encode All", f"panel_reencode_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("🔄 Re-encode HEVC 10b", f"panel_reencodehevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
          btn("🚀 Upload Now", f"panel_upload_{task_id}", style=enums.ButtonStyle.SUCCESS)],
-        [btn("❌ Cancel", f"panel_cancel_{task_id}", style=enums.ButtonStyle.DANGER)]
+        [btn("�?� Cancel", f"panel_cancel_{task_id}", style=enums.ButtonStyle.DANGER)]
     ])
 
 # Sinhala Help Menu
@@ -604,32 +614,32 @@ async def testdb_cmd(client, message):
         await client.send_message(PRIVATE_DB_CHANNEL, "✅ <b>Test Message:</b> DB Channel Connection is Working!", parse_mode=enums.ParseMode.HTML)
         await message.reply_text("✅ Message sent to DB Channel successfully!")
     except Exception as e:
-        await message.reply_text(f"❌ Failed to send to DB Channel: {e}")
+        await message.reply_text(f"�?� Failed to send to DB Channel: {e}")
 
 async def help_cmd(client, message):
     text = (
         "<b>📚 Super Encoder & Leech Bot Help Menu</b>\n\n"
-        "<b>📥 ටොරන්ට් භාගත කිරීම:</b>\n"
-        "<code>/leech &lt;magnet_link&gt;</code> - Torrent එකක් භාගත කර File list එක ලබා ගෙන අවශ්‍ය files තෝරාගැනීමට.\n\n"
+        "<b>📥 ටොරන්ට් භ�?ගත කිරීම:</b>\n"
+        "<code>/leech &lt;magnet_link&gt;</code> - Torrent එකක් භ�?ගත කර File list එක ලබ�? ගෙන අව�?්�?ය files ත�?ර�?ග�?නීමට.\n\n"
         "<b>🎨 Encoding Panel Commands:</b>\n"
-        "පහත Commands ඔයාට Panel එකේ බොත්තම් විදියට වගේම, කෙලින්ම <b>වීඩියෝ එකකට Reply කරලත්</b> පාවිච්චි කරන්න පුළුවන්.\n\n"
+        "පහත Commands ඔය�?ට Panel එකේ බොත්තම් විදියට වගේම, කෙලින්ම <b>වීඩිය�? එකකට Reply කරලත්</b> ප�?විච්චි කරන්න පුළුවන්.\n\n"
         "<b>🎬 Video Resolutions:</b>\n"
         "<code>/480</code> - 480p වලට Convert කිරීම.\n"
         "<code>/720</code> - 720p වලට Convert කිරීම.\n"
         "<code>/1080</code> - 1080p වලට Convert කිරීම.\n"
-        "<code>/reencode</code> - 480p, 720p, 1080p සහ Original එකත් එක්ක File 4ක්ම ලබා දීම.\n\n"
-        "<b>✂️ Subtitles:</b>\n"
+        "<code>/reencode</code> - 480p, 720p, 1080p සහ Original එකත් එක්ක File 4ක්ම ලබ�? දීම.\n\n"
+        "<b>✂�? Subtitles:</b>\n"
         "<code>/removesub</code> - Soft subtitles අයින් කිරීම.\n"
-        "<code>/addsub</code> - Subtitle එකතු කිරීම (වීඩියෝ එකකට subtitle file එකක් reply කරන්න).\n"
-        "<code>/extract_sub</code> - Subtitle එක වෙනම ගලවාගැනීම.\n\n"
+        "<code>/addsub</code> - Subtitle එකතු කිරීම (වීඩිය�? එකකට subtitle file එකක් reply කරන්න).\n"
+        "<code>/extract_sub</code> - Subtitle එක වෙනම ගලව�?ග�?නීම.\n\n"
         "<b>🎵 Audio:</b>\n"
-        "<code>/addaudio</code> - අලුත් Audio Track එකක් දැමීම.\n"
-        "<code>/extract_audio</code> - Audio එක වෙනම ගලවාගැනීම.\n"
+        "<code>/addaudio</code> - අලුත් Audio Track එකක් ද�?මීම.\n"
+        "<code>/extract_audio</code> - Audio එක වෙනම ගලව�?ග�?නීම.\n"
         "<code>/remaudio</code> - Audio Track එක අයින් කිරීම.\n\n"
         "<b>🖼 Thumbnail:</b>\n"
-        "<code>/extract_thumb</code> - වීඩියෝ එකේ Thumbnail එක ගලවාගැනීම.\n\n"
-        "<b>🛑 Tasks නැවැත්වීම:</b>\n"
-        "<code>/cancel_&lt;task_id&gt;</code> - ඕනෑම ක්‍රියාවලියක් නතර කිරීමට."
+        "<code>/extract_thumb</code> - වීඩිය�? එකේ Thumbnail එක ගලව�?ග�?නීම.\n\n"
+        "<b>🛑 Tasks න�?ව�?ත්වීම:</b>\n"
+        "<code>/cancel_&lt;task_id&gt;</code> - ඕනෑම ක්�?රිය�?වලියක් නතර කිරීමට."
     )
     await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
 
@@ -650,27 +660,30 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
     files_to_upload = []
     
     # Generate requested qualities based on action
-    if action in ["480", "720", "1080", "reencode"]:
-        res_list = [int(action)] if action != "reencode" else [480, 720, 1080]
-        if action == "reencode": files_to_upload.append(filepath) # Keep original
+    hevc_10bit = "hevc" in action
+    base_action = action.replace("hevc", "")
+    
+    if base_action in ["480", "720", "1080", "2160", "reencode"]:
+        res_list = [int(base_action)] if base_action != "reencode" else [480, 720, 1080]
+        if base_action == "reencode": files_to_upload.append(filepath) # Keep original
         
         for res in res_list:
             if cancel_flags.get(task_id): break
-            out_file = generate_res_name(filename, res) + ".mkv"
+            out_file = generate_res_name(filename, res) + ("_HEVC10.mkv" if hevc_10bit else ".mkv")
             out_path = os.path.join(os.path.dirname(filepath), out_file)
-            success = await encode_video(filepath, out_path, res, duration, task_id, out_file)
+            success = await encode_video(filepath, out_path, res, duration, task_id, out_file, hevc_10bit=hevc_10bit)
             if success:
                 out_path = await apply_mkv_watermark(out_path)
                 files_to_upload.append(out_path)
     elif action == "removesub":
         out_path = os.path.join(os.path.dirname(filepath), "nosub_" + filename)
         cmd = ["ffmpeg", "-y", "-i", filepath, "-map", "0:v", "-map", "0:a?", "-c", "copy", out_path]
-        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "✂️ Removing Subs", filename)
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "✂�? Removing Subs", filename)
         if success: files_to_upload.append(await apply_mkv_watermark(out_path))
     elif action == "addsub" and sub_path:
         out_path = os.path.join(os.path.dirname(filepath), "sub_" + filename)
         cmd = ["ffmpeg", "-y", "-i", filepath, "-i", sub_path, "-c", "copy", "-c:s", "srt", "-metadata:s:s:0", f"title={WATERMARK}", out_path]
-        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "📝 Adding Subtitle", filename)
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "�? Adding Subtitle", filename)
         if success: files_to_upload.append(await apply_mkv_watermark(out_path))
     elif action == "extract_sub":
         import json
@@ -688,7 +701,7 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
             logger.error(f"Error parsing mkvmerge: {e}")
             
         if not sub_tracks:
-            await client.send_message(chat_id, f"⚠️ <b>No subtitles found</b> or file is not MKV: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
+            await client.send_message(chat_id, f"⚠�? <b>No subtitles found</b> or file is not MKV: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
         else:
             base_name = os.path.splitext(filename)[0]
             extract_args = []
@@ -707,7 +720,7 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
                     files_to_upload.append(out_path)
                     
             if not files_to_upload:
-                await client.send_message(chat_id, f"⚠️ <b>Failed to extract subtitles</b> from: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
+                await client.send_message(chat_id, f"⚠�? <b>Failed to extract subtitles</b> from: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
     elif action == "addaudio" and audio_path:
         out_path = os.path.join(os.path.dirname(filepath), "audio_" + filename)
         cmd = ["ffmpeg", "-y", "-i", filepath, "-i", audio_path, "-c", "copy", "-map", "0:v", "-map", "0:a?", "-map", "1:a", "-map", "0:s?", out_path]
@@ -786,7 +799,7 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
                         with contextlib.suppress(Exception):
                             await client.send_message(
                                 chat_id,
-                                f"⚠️ <b>Database Warning:</b> Bot cannot post to <code>{TARGET_CHANNEL}</code>.\n"
+                                f"⚠�? <b>Database Warning:</b> Bot cannot post to <code>{TARGET_CHANNEL}</code>.\n"
                                 f"Please add the bot as an <b>Admin with 'Post Messages' permission</b> to the channel!",
                                 parse_mode=enums.ParseMode.HTML
                             )
@@ -797,7 +810,7 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
             with contextlib.suppress(Exception):
                 await client.send_message(
                     chat_id,
-                    f"❌ <b>Upload Failed:</b> <code>{safe_html(f_name)}</code>\n"
+                    f"�?� <b>Upload Failed:</b> <code>{safe_html(f_name)}</code>\n"
                     f"Error: <code>{safe_html(str(e)[:200])}</code>\n"
                     f"🔄 Try sending the file again.",
                     parse_mode=enums.ParseMode.HTML
@@ -852,7 +865,7 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                     with contextlib.suppress(Exception):
                         await client.send_message(
                             chat_id,
-                            f"❌ <b>Download Failed:</b> <code>{safe_html(file_name)}</code>\n"
+                            f"�?� <b>Download Failed:</b> <code>{safe_html(file_name)}</code>\n"
                             f"Error: <code>{safe_html(str(dl_err)[:200])}</code>\n\n"
                             f"💡 <i>Possible reasons:</i>\n"
                             f"• Telegram server timeout (large file)\n"
@@ -869,7 +882,7 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                     with contextlib.suppress(Exception):
                         await client.send_message(
                             chat_id,
-                            f"❌ <b>Download Error:</b> File <code>{safe_html(file_name)}</code> was not saved properly.\n"
+                            f"�?� <b>Download Error:</b> File <code>{safe_html(file_name)}</code> was not saved properly.\n"
                             f"🔄 <b>Please try again.</b>",
                             parse_mode=enums.ParseMode.HTML
                         )
@@ -877,9 +890,9 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                     return
                 
                 logger.info(f"File downloaded successfully: {path} ({format_bytes(os.path.getsize(path))})")
-                if action in ("enhance4k", "enhance4kv3", "enhance4kvideo2x", "enhance4kcugan", "enhance4kvulkan"):
+                if action == "enhance4k":
                     status_msg = await client.send_message(chat_id, "🔮 <b>Starting 4K Enhancement...</b>", parse_mode=enums.ParseMode.HTML)
-                    final_4k = await process_4k_enhancement(client, path, status_msg, task_id, model=action.replace("enhance4k", "") if action != "enhance4k" else "6B")
+                    final_4k = await process_4k_enhancement(client, path, status_msg, task_id)
                     if final_4k and os.path.exists(final_4k):
                         file_size = os.path.getsize(final_4k)
                         if file_size > MAX_FILE_SIZE:
@@ -947,10 +960,10 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
                 if not cancel_flags.get(task_id):
                     for f in dl.files:
                         if (getattr(f, "selected", False) or "url" in t_data) and os.path.exists(str(f.path)):
-                            if action in ("enhance4k", "enhance4kv3", "enhance4kvideo2x", "enhance4kcugan", "enhance4kvulkan"):
+                            if action == "enhance4k":
                                 # 4K Enhancement Pipeline
                                 status_msg = await client.send_message(chat_id, "🔮 <b>Starting 4K Enhancement...</b>", parse_mode=enums.ParseMode.HTML)
-                                final_4k = await process_4k_enhancement(client, str(f.path), status_msg, task_id, model=action.replace("enhance4k", "") if action != "enhance4k" else "6B")
+                                final_4k = await process_4k_enhancement(client, str(f.path), status_msg, task_id)
                                 if final_4k and os.path.exists(final_4k):
                                     file_size = os.path.getsize(final_4k)
                                     if file_size > MAX_FILE_SIZE:
@@ -979,7 +992,7 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
             with contextlib.suppress(Exception):
                 await client.send_message(
                     chat_id,
-                    f"❌ <b>Task Error:</b>\n<code>{safe_html(str(e)[:300])}</code>\n\n🔄 <b>Please try again.</b>",
+                    f"�?� <b>Task Error:</b>\n<code>{safe_html(str(e)[:300])}</code>\n\n🔄 <b>Please try again.</b>",
                     parse_mode=enums.ParseMode.HTML
                 )
         finally:
@@ -1040,7 +1053,7 @@ async def handle_leech(client, message):
         return await message.reply("Please provide a magnet link! Example: <code>/leech magnet:?...</code>", parse_mode=enums.ParseMode.HTML)
     magnet = message.command[1]
     
-    status_msg = await message.reply("🔍 <i>Fetching torrent metadata...</i>", parse_mode=enums.ParseMode.HTML)
+    status_msg = await message.reply("�? <i>Fetching torrent metadata...</i>", parse_mode=enums.ParseMode.HTML)
     temp_dir = f"/content/meta_{message.id}"
     os.makedirs(temp_dir, exist_ok=True)
     
@@ -1050,7 +1063,7 @@ async def handle_leech(client, message):
         await proc.communicate()
         
         t_file = next((os.path.join(temp_dir, n) for n in os.listdir(temp_dir) if n.endswith(".torrent")), None)
-        if not t_file: return await status_msg.edit_text("❌ Failed to fetch torrent metadata.")
+        if not t_file: return await status_msg.edit_text("�?� Failed to fetch torrent metadata.")
         
         global aria2_api
         
@@ -1087,7 +1100,7 @@ async def handle_leech(client, message):
         }
         await status_msg.delete()
     except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {e}")
+        await status_msg.edit_text(f"�?� Error: {e}")
 
 # --- URL COMMAND ---
 async def handle_url(client, message):
@@ -1116,12 +1129,12 @@ async def handle_url(client, message):
 # --- THUMBNAIL HANDLER ---
 async def save_thumbnail(client, message):
     if message.photo:
-        status = await message.reply("🖼️ <i>Downloading thumbnail...</i>", parse_mode=enums.ParseMode.HTML)
+        status = await message.reply("🖼�? <i>Downloading thumbnail...</i>", parse_mode=enums.ParseMode.HTML)
         try:
             await message.download(file_name=CUSTOM_THUMB_PATH)
             await status.edit_text("✅ <b>Custom thumbnail saved successfully!</b>\nIt will be used for all future uploads.", parse_mode=enums.ParseMode.HTML)
         except Exception as e:
-            await status.edit_text(f"❌ <b>Error saving thumbnail:</b>\n{e}", parse_mode=enums.ParseMode.HTML)
+            await status.edit_text(f"�?� <b>Error saving thumbnail:</b>\n{e}", parse_mode=enums.ParseMode.HTML)
 
 # --- REPLY COMMANDS & FILE SELECTION ---
 async def reply_handler(client, message):
@@ -1172,7 +1185,7 @@ async def reply_handler(client, message):
     if r_id in current_tasks:
         task_data = current_tasks.pop(r_id)
         selected = parse_selection(text, len(task_data["files"]))
-        if not selected: return await message.reply("❌ Invalid file selection. Please enter numbers like <code>1,2,3</code> or <code>all</code>.", parse_mode=enums.ParseMode.HTML)
+        if not selected: return await message.reply("�?� Invalid file selection. Please enter numbers like <code>1,2,3</code> or <code>all</code>.", parse_mode=enums.ParseMode.HTML)
         
         task_data["selected"] = selected
         new_task_id = str(message.id)
@@ -1192,7 +1205,7 @@ async def reply_handler(client, message):
             action = text.replace("/", "").split()[0].replace(f"@{client.me.username}" if client.me else "", "")
             
             if action == "addsub":
-                prompt = await message.reply("📝 <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
+                prompt = await message.reply("�? <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
                 pending_sub_replies[str(prompt.id)] = message.reply_to_message
                 return
             elif action == "addaudio":
@@ -1231,13 +1244,13 @@ async def cb_handler(client, cb):
         
         if action == "addsub":
             await cb.message.edit_reply_markup(None)
-            prompt = await cb.message.reply("📝 <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
+            prompt = await cb.message.reply("�? <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
             pending_sub_replies[str(prompt.id)] = media_target
             return
 
         if action == "rename":
             await cb.message.edit_reply_markup(None)
-            prompt = await cb.message.reply("✏️ <b>Please reply to THIS message with the NEW NAME (with extension, e.g. video.mkv):</b>", parse_mode=enums.ParseMode.HTML)
+            prompt = await cb.message.reply("�?�? <b>Please reply to THIS message with the NEW NAME (with extension, e.g. video.mkv):</b>", parse_mode=enums.ParseMode.HTML)
             is_tg = (task_id not in current_tasks)
             pending_renames[str(prompt.id)] = {"task_id": task_id, "is_tg": is_tg, "media_msg": media_target}
             return
@@ -1249,7 +1262,7 @@ async def cb_handler(client, cb):
         if is_tg and (not media_target or not (media_target.document or media_target.video)):
             logger.error(f"No valid media found for task {task_id}")
             await cb.message.reply(
-                "❌ <b>Error:</b> Could not find the original file message.\n"
+                "�?� <b>Error:</b> Could not find the original file message.\n"
                 "🔄 <b>Please re-send the video and try again.</b>",
                 parse_mode=enums.ParseMode.HTML
             )
@@ -1273,7 +1286,7 @@ async def cancel_cmd(client, message):
         cancel_flags[task_id] = True
         await message.reply(f"🛑 <b>Task <code>{task_id}</code> is stopping...</b>", parse_mode=enums.ParseMode.HTML)
     else:
-        await message.reply("❌ Task not found or already finished.")
+        await message.reply("�?� Task not found or already finished.")
 
 # ============================================================
 # --- 4K REAL-ESRGAN ENHANCEMENT SYSTEM (Auto-Resume) ---
@@ -1303,59 +1316,17 @@ async def _split_video_to_chunks(input_video, output_dir, segment_seconds=60):
     await _run_shell(cmd)
     return sorted(glob.glob(os.path.join(output_dir, f"{basename}_chunk_*.mp4")))
 
-async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, prefix_text="", model="6B", progress_callback=None):
+async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, prefix_text=""):
     """Run Real-ESRGAN inference on a single chunk with real-time progress"""
     import time
     import re
-    if model == "video2x":
-        if '/content' == '/kaggle/working':
-            # Kaggle: video2x .deb crashes kernel (Exit 137), use NCNN bash script instead
-            tmp_in = output_path + "_tmp_in"
-            tmp_out = output_path + "_tmp_out"
-            bash_cmd = (
-                f"mkdir -p '{tmp_in}' '{tmp_out}' && "
-                f"ffmpeg -hide_banner -loglevel error -i '{input_path}' '{tmp_in}/%08d.jpg' && "
-                f"cd /content/realesrgan_vulkan && chmod +x realesrgan-ncnn-vulkan && ./realesrgan-ncnn-vulkan -i '{tmp_in}' -o '{tmp_out}' -n realesr-animevideov3 -s 4 -f jpg && "
-                f"FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 '{input_path}') && "
-                f"ffmpeg -hide_banner -loglevel error -framerate $FPS -i '{tmp_out}/%08d.jpg' -i '{input_path}' -map 0:v -map 1:a? -c:v libx264 -crf 20 -c:a copy '{output_path}' && "
-                f"rm -rf '{tmp_in}' '{tmp_out}'"
-            )
-            cmd = ["bash", "-c", bash_cmd]
-        else:
-            bash_cmd = f"export PATH=/content/realesrgan_vulkan:$PATH && video2x -i '{input_path}' -o '{output_path}' -p realesrgan -s 4 --realesrgan-model realesr-animevideov3 1>&2"
-            cmd = ["bash", "-c", bash_cmd]
-    elif model == "cugan":
-        tmp_in = output_path + "_tmp_in"
-        tmp_out = output_path + "_tmp_out"
-        bash_cmd = (
-            f"mkdir -p '{tmp_in}' '{tmp_out}' && "
-            f"ffmpeg -hide_banner -loglevel error -i '{input_path}' '{tmp_in}/%08d.jpg' && "
-            f"cd /content/realcugan && chmod +x realcugan-ncnn-vulkan && ./realcugan-ncnn-vulkan -i '{tmp_in}' -o '{tmp_out}' -s 2 -n 2 -f jpg && "
-            f"FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 '{input_path}') && "
-            f"ffmpeg -hide_banner -loglevel error -framerate $FPS -i '{tmp_out}/%08d.jpg' -i '{input_path}' -map 0:v -map 1:a? -c:v libx264 -crf 20 -c:a copy '{output_path}' && "
-            f"rm -rf '{tmp_in}' '{tmp_out}'"
-        )
-        cmd = ["bash", "-c", bash_cmd]
-    elif model == "vulkan":
-        tmp_in = output_path + "_tmp_in"
-        tmp_out = output_path + "_tmp_out"
-        bash_cmd = (
-            f"mkdir -p '{tmp_in}' '{tmp_out}' && "
-            f"ffmpeg -hide_banner -loglevel error -i '{input_path}' '{tmp_in}/%08d.jpg' && "
-            f"cd /content/realesrgan_vulkan && chmod +x realesrgan-ncnn-vulkan && ./realesrgan-ncnn-vulkan -i '{tmp_in}' -o '{tmp_out}' -n realesrgan-x4plus-anime -s 4 -f jpg && "
-            f"FPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 '{input_path}') && "
-            f"ffmpeg -hide_banner -loglevel error -framerate $FPS -i '{tmp_out}/%08d.jpg' -i '{input_path}' -map 0:v -map 1:a? -c:v libx264 -crf 20 -c:a copy '{output_path}' && "
-            f"rm -rf '{tmp_in}' '{tmp_out}'"
-        )
-        cmd = ["bash", "-c", bash_cmd]
-    else:
-        cmd = [
-            "python", "/content/Real-ESRGAN/inference_realesrgan_video.py",
-            "-n", "realesr-animevideov3" if model == "v3" else "RealESRGAN_x4plus_anime_6B",
-            "-i", input_path,
-            "-o", output_path,
-            "--outscale", "2" if model == "v3" else "4"
-        ]
+    cmd = [
+        "python", "/content/Real-ESRGAN/inference_realesrgan_video.py",
+        "-n", "RealESRGAN_x4plus_anime_6B",
+        "-i", input_path,
+        "-o", output_path,
+        "--outscale", "4"
+    ]
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -1372,84 +1343,44 @@ async def _upscale_chunk_realesrgan(input_path, output_path, status_msg=None, pr
         text = line.decode('utf-8', errors='ignore')
         err_acc += text
         
-        if (status_msg or progress_callback) and ("%" in text or "it" in text):
+        if status_msg and ("%" in text or "it" in text):
             parts = text.split("\r")
             clean = parts[-1].strip() if parts else text.strip()
             
-            # Extract frame number like "23/1440" or percentage like "48.33%"
-            matches = re.findall(r'(\d+)/\d+', text)
-            match = re.search(r'(\d+)/\d+', clean) if not matches else True
-            pct_match = re.search(r'(\d+\.\d+)%', clean)
-            if matches:
-                clean = text.strip()
+            # Extract frame number like "23/1440"
+            match = re.search(r'(\d+)/\d+', clean)
             now = time.time()
             if match:
-                current_frame = int(matches[-1]) if "matches" in locals() and matches else int(match.group(1))
+                current_frame = int(match.group(1))
                 if current_frame - last_frame >= 1 or now - last_update > 8:
                     last_frame = current_frame
                     if clean:
-                        if progress_callback:
-                            progress_callback(clean)
-                        elif status_msg:
-                            try:
-                                await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
-                                last_update = now
-                            except: pass
-            elif pct_match:
-                pct = float(pct_match.group(1))
-                elapsed = now - (last_frame if last_frame > 100000 else time.time() - 1)  # Hack: use last_frame as start_time if it's large
-                if last_frame < 100000: last_frame = now  # Initialize start_time in last_frame
-                
-                if pct > 0.1 and now - last_update > 3:
-                    total_time_est = (now - last_frame) / (pct / 100.0)
-                    rem_time = max(0, total_time_est - (now - last_frame))
-                    rem_mins = int(rem_time // 60)
-                    rem_secs = int(rem_time % 60)
-                    
-                    frames_est = int((pct / 100.0) * 192)
-                    
-                    formatted_clean = f"[Kframe={frames_est}/192 ({pct:.2f}%); remaining={rem_mins:02d}:{rem_secs:02d}]"
-                    
-                    if progress_callback:
-                        progress_callback(formatted_clean)
-                    elif status_msg:
                         try:
-                            await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{formatted_clean}</code>", parse_mode=enums.ParseMode.HTML)
+                            await status_msg.edit_text(f"{prefix_text}\n\n�?� <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
                             last_update = now
                         except: pass
             else:
                 if now - last_update > 8:
                     if clean:
-                        if progress_callback:
-                            progress_callback(clean)
-                        elif status_msg:
-                            try:
-                                await status_msg.edit_text(f"{prefix_text}\n\n⏳ <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
-                                last_update = now
-                            except: pass
+                        try:
+                            await status_msg.edit_text(f"{prefix_text}\n\n�?� <b>AI Processing:</b>\n<code>{clean}</code>", parse_mode=enums.ParseMode.HTML)
+                            last_update = now
+                        except: pass
 
     await proc.wait()
-    
-    if model not in ["anime4k", "cugan", "video2x", "vulkan"]:
-        import shutil
-        basename = os.path.splitext(os.path.basename(input_path))[0]
-        actual_file = os.path.join(output_path, f"{basename}_out.mp4")
-        if os.path.exists(actual_file):
-            tmp_dir = output_path + "_dir"
-            os.rename(output_path, tmp_dir)
-            shutil.move(os.path.join(tmp_dir, f"{basename}_out.mp4"), output_path)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    return os.path.exists(output_path), err_acc
+    return proc.returncode == 0 and os.path.exists(output_path), err_acc
 
 async def _encode_hevc_10bit(input_path, output_path):
     """FFmpeg: Re-encode to 10-bit HEVC x265"""
+    has_nvenc = check_gpu()
+    if has_nvenc:
+        vcodec = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", "28", "-pix_fmt", "p010le"]
+    else:
+        vcodec = ["-c:v", "libx265", "-preset", "medium", "-x265-params", "profile=main10", "-pix_fmt", "yuv420p10le", "-crf", "18"]
+
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
-        "-c:v", "libx265", "-preset", "medium",
-        "-x265-params", "profile=main10",
-        "-pix_fmt", "yuv420p10le",
-        "-crf", "18",
+        *vcodec,
         "-c:a", "copy",
         output_path
     ]
@@ -1490,10 +1421,10 @@ async def _find_completed_chunks(client, job_tag):
         logger.warning(f"Resume search failed: {e}")
     return completed
 
-async def process_4k_enhancement(client, input_video_path, status_msg, task_id, model="6B"):
+async def process_4k_enhancement(client, input_video_path, status_msg, task_id):
     """Main 4K pipeline: split → resume check → upscale → merge → encode"""
     basename = os.path.splitext(os.path.basename(input_video_path))[0]
-    job_tag = f"{basename}_{model}".replace(" ", "_").replace(".", "_").replace("-", "_")
+    job_tag = basename.replace(" ", "_").replace(".", "_").replace("-", "_")
     
     work_dir = f"/content/4k_work_{job_tag}"
     raw_dir = os.path.join(work_dir, "raw_chunks")
@@ -1502,117 +1433,64 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id, 
     os.makedirs(upscaled_dir, exist_ok=True)
     
     # Step 1: Split
-    await status_msg.edit_text("✂️ <b>Step 1/4:</b> Splitting video into 1-min chunks...", parse_mode=enums.ParseMode.HTML)
+    await status_msg.edit_text("✂�? <b>Step 1/4:</b> Splitting video into 1-min chunks...", parse_mode=enums.ParseMode.HTML)
     raw_chunks = await _split_video_to_chunks(input_video_path, raw_dir, segment_seconds=8)
     total = len(raw_chunks)
     if total == 0:
-        await status_msg.edit_text("❌ FFmpeg split failed - no chunks created.")
+        await status_msg.edit_text("�?� FFmpeg split failed - no chunks created.")
         return None
     
-    await status_msg.edit_text(f"✂️ Split into <b>{total}</b> chunks.", parse_mode=enums.ParseMode.HTML)
+    await status_msg.edit_text(f"✂�? Split into <b>{total}</b> chunks.", parse_mode=enums.ParseMode.HTML)
     
     # Step 2: Resume check
-    await status_msg.edit_text("🔍 <b>Step 2/4:</b> Checking DB Channel for previous progress...", parse_mode=enums.ParseMode.HTML)
+    await status_msg.edit_text("�? <b>Step 2/4:</b> Checking DB Channel for previous progress...", parse_mode=enums.ParseMode.HTML)
     existing = await _find_completed_chunks(client, job_tag)
     skipped = 0
     
-    # Step 3: Upscale chunks (Parallel for lightweight models)
-    max_concurrent = 3 if model in ("v3", "anime4k") else (2 if model == "cugan" else 1)
-    semaphore = asyncio.Semaphore(max_concurrent)
-    
-    completed_chunks = 0
-    failed_chunks = 0
-    final_chunks = [None] * total
-    chunk_progress = {}
-    
-    async def process_single_chunk(i, raw_chunk):
-        nonlocal completed_chunks, failed_chunks, skipped
+    # Step 3: Upscale each chunk
+    final_chunks = []
+    for i, raw_chunk in enumerate(raw_chunks):
         chunk_tag = f"#{job_tag}_Chunk_{i:03d}"
         out_name = os.path.basename(raw_chunk).replace(".mp4", "_4k.mp4")
         out_path = os.path.join(upscaled_dir, out_name)
         
-        async with semaphore:
-            if chunk_tag in existing:
-                try:
-                    await client.download_media(existing[chunk_tag], file_name=out_path)
-                    skipped += 1
-                    completed_chunks += 1
-                    final_chunks[i] = out_path
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to download {chunk_tag} from DB: {e}")
-            
-            # Upscale
-            # We don't pass status_msg to prevent floodwaits during parallel processing
-            def prog_cb(text):
-                chunk_progress[i] = text
-            success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, None, "", model=model, progress_callback=prog_cb)
-            if not success:
-                logger.error(f"Chunk {i} failed: {err_msg}")
-                failed_chunks += 1
-                return False
-                
-        # Upload to DB channel OUTSIDE the semaphore so GPU isn't idle during upload!
-        try:
-            await client.send_document(
-                chat_id=PRIVATE_DB_CHANNEL,
-                document=out_path,
-                caption=f"🎬 4K Chunk |\n{basename}\n{chunk_tag}\n{WATERMARK}"
+        if chunk_tag in existing:
+            skipped += 1
+            await status_msg.edit_text(
+                f"�?� <b>Chunk {i+1}/{total}</b> — already in DB! Downloading back...\n"
+                f"(Skipped: {skipped} | Remaining: {total - i - 1})",
+                parse_mode=enums.ParseMode.HTML
             )
-            logger.info(f"Uploaded {chunk_tag} to DB Channel.")
-        except Exception as e:
-            logger.error(f"Failed to upload {chunk_tag} to DB: {e}")
-            
-        completed_chunks += 1
-        final_chunks[i] = out_path
-        return True
-
-    # Start a background task to update status message periodically
-    async def update_status():
-        while completed_chunks + failed_chunks < total:
             try:
-                prog_text = "\n".join([f"▶️ Chunk {k+1}: <code>{v}</code>" for k, v in chunk_progress.items() if v and not (final_chunks[k] or k < completed_chunks)])
-                if prog_text: prog_text = "\n\n<b>Live Progress:</b>\n" + prog_text
-                
-                await status_msg.edit_text(
-                    f"⚙️ <b>Parallel Upscaling ({max_concurrent}x)...</b>\n"
-                    f"✅ Completed: {completed_chunks}/{total}\n"
-                    f"⏩ Skipped: {skipped}\n"
-                    f"❌ Failed: {failed_chunks}{prog_text}", 
-                    parse_mode=enums.ParseMode.HTML
-                )
-            except Exception:
-                pass
-            await asyncio.sleep(5)
-            
-    status_task = asyncio.create_task(update_status())
-    
-    # Run all chunks concurrently with semaphore limits
-    tasks = [process_single_chunk(i, chunk) for i, chunk in enumerate(raw_chunks)]
-    results = await asyncio.gather(*tasks)
-    
-    status_task.cancel()
-    
-    if not all(results):
-        await status_msg.edit_text("❌ Upscaling failed for some chunks. Please check logs.")
-        return None
+                await client.download_media(existing[chunk_tag], file_name=out_path)
+            except Exception as e:
+                logger.error(f"Failed to download chunk {i} from DB: {e}")
+                await status_msg.edit_text(f"⚠�? DB download failed for chunk {i+1}, re-processing...")
+                msg_text = f"⚠�? DB download failed for chunk {i+1}, re-processing..."
+                success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status_msg, msg_text)
+                if not success:
+                    err_snippet = safe_html(str(err_msg)[-800:]) if err_msg else "Unknown Error"
+                    await status_msg.edit_text(f"�?� Upscaling failed at chunk {i+1}.\n\n<b>Error details:</b>\n<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
+                    return None
+            final_chunks.append(out_path)
+            continue
         
         if task_id in ACTIVE_TASKS:
             ACTIVE_TASKS[task_id].update({
                 "status": f"🚀 4K: Chunk {i+1}/{total}"
             })
             
-        msg_text = f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\n⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\n\n<i>This may take 15-40 min per chunk depending on GPU.</i>"
+        msg_text = f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\n�?� Skipped: {skipped} | �?� Remaining after this: {total - i - 1}\n\n<i>This may take 15-40 min per chunk depending on GPU.</i>"
         await status_msg.edit_text(msg_text, parse_mode=enums.ParseMode.HTML)
         
-        success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status_msg, msg_text, model=model)
+        success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status_msg, msg_text)
         if not success:
             err_snippet = safe_html(str(err_msg)[-800:]) if err_msg else "Unknown Error"
-            await status_msg.edit_text(f"❌ Real-ESRGAN failed on chunk {i+1}/{total}.\n\n<b>Error details:</b>\n<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
+            await status_msg.edit_text(f"�?� Real-ESRGAN failed on chunk {i+1}/{total}.\n\n<b>Error details:</b>\n<code>{err_snippet}</code>", parse_mode=enums.ParseMode.HTML)
             return None
         
         await status_msg.edit_text(
-            f"☁️ <b>Auto-saving Chunk {i+1}/{total}</b> to DB Channel...",
+            f"�?�? <b>Auto-saving Chunk {i+1}/{total}</b> to DB Channel...",
             parse_mode=enums.ParseMode.HTML
         )
         try:
@@ -1644,7 +1522,7 @@ async def process_4k_enhancement(client, input_video_path, status_msg, task_id, 
     merged_path = f"/content/{basename}_4K.mp4"
     merge_ok = await _merge_chunks(final_chunks, merged_path)
     if not merge_ok:
-        await status_msg.edit_text("❌ Failed to merge chunks.")
+        await status_msg.edit_text("�?� Failed to merge chunks.")
         return None
     
     # Encode to 10-bit HEVC x265
@@ -1668,18 +1546,18 @@ async def handle_enhance(client, message):
     
     # Case 1: /enhance as reply to a video/document
     if message.reply_to_message and (message.reply_to_message.video or message.reply_to_message.document):
-        status = await message.reply("⬇️ <b>Downloading video from Telegram...</b>", parse_mode=enums.ParseMode.HTML)
+        status = await message.reply("⬇�? <b>Downloading video from Telegram...</b>", parse_mode=enums.ParseMode.HTML)
         try:
             video_path = await client.download_media(message.reply_to_message, file_name="/content/enhance_input/")
         except Exception as e:
-            return await status.edit_text(f"❌ Download failed: {e}")
+            return await status.edit_text(f"�?� Download failed: {e}")
     
     # Case 2: /enhance <magnet_or_url>
     elif len(message.command) >= 2:
         link = " ".join(message.command[1:])  # Support links with spaces
         dl_dir = "/content/enhance_input"
         os.makedirs(dl_dir, exist_ok=True)
-        status = await message.reply("⬇️ <b>Downloading...</b>", parse_mode=enums.ParseMode.HTML)
+        status = await message.reply("⬇�? <b>Downloading...</b>", parse_mode=enums.ParseMode.HTML)
         
         try:
             if link.startswith("magnet:"):
@@ -1695,7 +1573,7 @@ async def handle_enhance(client, message):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                await status.edit_text("⬇️ <b>Downloading torrent content...</b>\n<i>This may take a while...</i>", parse_mode=enums.ParseMode.HTML)
+                await status.edit_text("⬇�? <b>Downloading torrent content...</b>\n<i>This may take a while...</i>", parse_mode=enums.ParseMode.HTML)
                 await proc.communicate()
                 
                 # Find the largest video file in the download directory
@@ -1724,16 +1602,16 @@ async def handle_enhance(client, message):
                     await asyncio.sleep(3)
                     dl.update()
                     if dl.status == "error":
-                        return await status.edit_text(f"❌ Download error: {dl.error_message}")
+                        return await status.edit_text(f"�?� Download error: {dl.error_message}")
                     try:
                         pct = dl.progress_string()
                         speed = dl.download_speed_string()
-                        await status.edit_text(f"⬇️ Downloading... {pct} | {speed}", parse_mode=enums.ParseMode.HTML)
+                        await status.edit_text(f"⬇�? Downloading... {pct} | {speed}", parse_mode=enums.ParseMode.HTML)
                     except Exception:
                         pass
                 video_path = dl.files[0].path if dl.files else None
         except Exception as e:
-            return await status.edit_text(f"❌ Download failed: {e}")
+            return await status.edit_text(f"�?� Download failed: {e}")
     else:
         return await message.reply(
             "📖 <b>4K Enhance - Usage:</b>\n\n"
@@ -1744,11 +1622,11 @@ async def handle_enhance(client, message):
         )
     
     if not video_path or not os.path.exists(video_path):
-        return await status.edit_text("❌ No video file found after download.\n\n<i>Tip: Make sure the torrent/link contains a video file (.mp4, .mkv, etc.)</i>", parse_mode=enums.ParseMode.HTML)
+        return await status.edit_text("�?� No video file found after download.\n\n<i>Tip: Make sure the torrent/link contains a video file (.mp4, .mkv, etc.)</i>", parse_mode=enums.ParseMode.HTML)
     
     # --- Begin 4K Enhancement Pipeline ---
     basename = os.path.splitext(os.path.basename(video_path))[0]
-    job_tag = f"{basename}_{model}".replace(" ", "_").replace(".", "_").replace("-", "_")
+    job_tag = basename.replace(" ", "_").replace(".", "_").replace("-", "_")
     
     work_dir = f"/content/4k_work_{job_tag}"
     raw_dir = os.path.join(work_dir, "raw_chunks")
@@ -1757,16 +1635,16 @@ async def handle_enhance(client, message):
     os.makedirs(upscaled_dir, exist_ok=True)
     
     # Step 1: Split
-    await status.edit_text("✂️ <b>Step 1/4:</b> Splitting video into 1-min chunks...", parse_mode=enums.ParseMode.HTML)
+    await status.edit_text("✂�? <b>Step 1/4:</b> Splitting video into 1-min chunks...", parse_mode=enums.ParseMode.HTML)
     raw_chunks = await _split_video_to_chunks(video_path, raw_dir, segment_seconds=60)
     total = len(raw_chunks)
     if total == 0:
-        return await status.edit_text("❌ FFmpeg split failed - no chunks created.")
+        return await status.edit_text("�?� FFmpeg split failed - no chunks created.")
     
-    await status.edit_text(f"✂️ Split into <b>{total}</b> chunks.", parse_mode=enums.ParseMode.HTML)
+    await status.edit_text(f"✂�? Split into <b>{total}</b> chunks.", parse_mode=enums.ParseMode.HTML)
     
     # Step 2: Resume check
-    await status.edit_text("🔍 <b>Step 2/4:</b> Checking DB Channel for previous progress...", parse_mode=enums.ParseMode.HTML)
+    await status.edit_text("�? <b>Step 2/4:</b> Checking DB Channel for previous progress...", parse_mode=enums.ParseMode.HTML)
     existing = await _find_completed_chunks(client, job_tag)
     skipped = 0
     
@@ -1781,7 +1659,7 @@ async def handle_enhance(client, message):
         if chunk_tag in existing:
             skipped += 1
             await status.edit_text(
-                f"⏩ <b>Chunk {i+1}/{total}</b> — already in DB! Downloading back...\n"
+                f"�?� <b>Chunk {i+1}/{total}</b> — already in DB! Downloading back...\n"
                 f"(Skipped: {skipped} | Remaining: {total - i - 1})",
                 parse_mode=enums.ParseMode.HTML
             )
@@ -1790,25 +1668,25 @@ async def handle_enhance(client, message):
             except Exception as e:
                 logger.error(f"Failed to download chunk {i} from DB: {e}")
                 # If download fails, re-process it
-                await status.edit_text(f"⚠️ DB download failed for chunk {i+1}, re-processing...")
-                msg_text = f"⚠️ DB download failed for chunk {i+1}, re-processing..."
+                await status.edit_text(f"⚠�? DB download failed for chunk {i+1}, re-processing...")
+                msg_text = f"⚠�? DB download failed for chunk {i+1}, re-processing..."
                 success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status, msg_text)
                 if not success:
-                    return await status.edit_text(f"❌ Upscaling failed at chunk {i+1}.")
+                    return await status.edit_text(f"�?� Upscaling failed at chunk {i+1}.")
             final_chunks.append(out_path)
             continue
         
         # Process this chunk fresh
-        msg_text = f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\n⏩ Skipped: {skipped} | ⏳ Remaining after this: {total - i - 1}\n\n<i>This may take 15-40 min per chunk depending on GPU.</i>"
+        msg_text = f"🚀 <b>Step 3/4: Upscaling Chunk {i+1}/{total}</b> to 4K...\n�?� Skipped: {skipped} | �?� Remaining after this: {total - i - 1}\n\n<i>This may take 15-40 min per chunk depending on GPU.</i>"
         await status.edit_text(msg_text, parse_mode=enums.ParseMode.HTML)
         
         success, err_msg = await _upscale_chunk_realesrgan(raw_chunk, out_path, status, msg_text)
         if not success:
-            return await status.edit_text(f"❌ Real-ESRGAN failed on chunk {i+1}/{total}.")
+            return await status.edit_text(f"�?� Real-ESRGAN failed on chunk {i+1}/{total}.")
         
         # Upload completed chunk to Private DB Channel (auto-save)
         await status.edit_text(
-            f"☁️ <b>Auto-saving Chunk {i+1}/{total}</b> to DB Channel...",
+            f"�?�? <b>Auto-saving Chunk {i+1}/{total}</b> to DB Channel...",
             parse_mode=enums.ParseMode.HTML
         )
         try:
@@ -1841,7 +1719,7 @@ async def handle_enhance(client, message):
     merged_path = f"/content/{basename}_4K.mp4"
     merge_ok = await _merge_chunks(final_chunks, merged_path)
     if not merge_ok:
-        return await status.edit_text("❌ Failed to merge chunks.")
+        return await status.edit_text("�?� Failed to merge chunks.")
     
     # Optional: Encode to 10-bit HEVC x265
     await status.edit_text("🎬 <b>Encoding to 10-bit HEVC x265...</b>", parse_mode=enums.ParseMode.HTML)
@@ -1856,7 +1734,7 @@ async def handle_enhance(client, message):
         file_size = os.path.getsize(final_output)
         if file_size > MAX_FILE_SIZE:
             await status.edit_text(
-                f"⚠️ Final video is {file_size // (1024*1024)} MB (over 2GB limit).\n"
+                f"⚠�? Final video is {file_size // (1024*1024)} MB (over 2GB limit).\n"
                 f"Uploading to DB Channel instead...",
                 parse_mode=enums.ParseMode.HTML
             )
@@ -1875,7 +1753,7 @@ async def handle_enhance(client, message):
             )
             await status.edit_text("✅ <b>4K Enhancement Complete!</b> 🎉")
     except Exception as e:
-        await status.edit_text(f"❌ Upload failed: {e}")
+        await status.edit_text(f"�?� Upload failed: {e}")
     
     # Cleanup
     shutil.rmtree(work_dir, ignore_errors=True)
@@ -1951,6 +1829,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
