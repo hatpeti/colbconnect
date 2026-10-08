@@ -567,7 +567,7 @@ async def encode_video(input_path, output_path, resolution, total_duration, task
 
     if hevc_10bit:
         if has_nvenc:
-            vcodec = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", cq, "-pix_fmt", "p010le"]
+            vcodec = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-cq", cq, "-pix_fmt", "p010le"]
             action = f"⚙️ Encoding {resolution}p HEVC 10b (GPU)"
         else:
             vcodec = ["-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p10le"]
@@ -1374,7 +1374,7 @@ async def _encode_hevc_10bit(input_path, output_path):
     """FFmpeg: Re-encode to 10-bit HEVC x265"""
     has_nvenc = check_gpu()
     if has_nvenc:
-        vcodec = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", "28", "-pix_fmt", "p010le"]
+        vcodec = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-cq", "28", "-pix_fmt", "p010le"]
     else:
         vcodec = ["-c:v", "libx265", "-preset", "medium", "-x265-params", "profile=main10", "-pix_fmt", "yuv420p10le", "-crf", "18"]
 
