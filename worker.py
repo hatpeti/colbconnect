@@ -286,6 +286,8 @@ async def download_with_retry(client, message, file_name, chat_id=None, msg_id=N
 
 async def upload_with_retry(client, chat_id, f_path, f_name, thumb, progress=None, max_retries=UPLOAD_MAX_RETRIES):
     """Upload a file to Telegram with retry logic."""
+    global upload_client
+    uploader = upload_client if upload_client else client
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
