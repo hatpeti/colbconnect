@@ -59,7 +59,7 @@ PART_SIZE = 512 * 1024
 UPLOAD_WORKERS = 8
 PART_RETRIES = 8
 UI_INTERVAL = 3.0
-MAX_FILE_SIZE = 2000 * 1024 * 1024
+MAX_FILE_SIZE = 4000 * 1024 * 1024
 BIG_FILE_THRESHOLD = 10 * 1024 * 1024
 SESSION_DIR = "/content/telegram_sessions"
 os.makedirs(SESSION_DIR, exist_ok=True)
@@ -290,7 +290,7 @@ async def upload_with_retry(client, chat_id, f_path, f_name, thumb, progress=Non
     for attempt in range(1, max_retries + 1):
         try:
             logger.info(f"Upload attempt {attempt}/{max_retries} for {f_name}")
-            msg = await client.send_document(
+            msg = await uploader.send_document(
                 chat_id=chat_id,
                 document=f_path,
                 thumb=thumb,
@@ -1799,8 +1799,14 @@ async def main():
             if data.get("status") != "AUTHORIZED": return
             
             api_id, api_hash, bot_token = data.get("API_ID"), data.get("API_HASH"), data.get("BOT_TOKEN")
+            premium_session = data.get("PREMIUM_SESSION")
             app = Client("colab_worker", api_id=api_id, api_hash=api_hash, bot_token=bot_token, in_memory=True)
-            upload_client = app
+            if premium_session:
+                user_app = Client("colab_user", api_id=api_id, api_hash=api_hash, session_string=premium_session, in_memory=True)
+                upload_client = user_app
+                await user_app.start()
+            else:
+                upload_client = app
             
             # Register Handlers for Private AND Group chats
             app.add_handler(MessageHandler(start_cmd, filters.command("start")))
@@ -1829,6 +1835,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
