@@ -6,9 +6,9 @@
 # ============================================================================
 import os, sys, subprocess, shutil, time
 
-BOT_TOKEN = ""
-API_ID = ""
-API_HASH = ""
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8527387193:AAH46AGz1RJOJ6zd5at59Z_msIUuytcKDGc")
+API_ID = int(os.getenv("API_ID", 38017568))
+API_HASH = os.getenv("API_HASH", "edce8874495cfda158be92a333fa4823")
 
 WORK_ROOT = "/content/work" if os.path.isdir("/content") else os.path.abspath("work")
 FONT_DIR = os.path.expanduser("~/.fonts")
@@ -52,6 +52,62 @@ def patch_font(path):
     except Exception as e:
         log(f"      ⚠️  Font Patch අසාර්ථකයි ({os.path.basename(path)}): {e}")
         return False
+
+
+def extract_embedded_fonts(video, dest):
+    """වීඩියෝව (MKV) ඇතුළේ Attachment විදිහට තියෙන Fonts `dest` එකට Extract කරලා,
+    ඒවායේ Family නම් -> {"si": සිංහල Glyphs තියෙනවද, "latin": English Glyphs තියෙනවද} Dict එකක් දෙනවා."""
+    os.makedirs(dest, exist_ok=True)
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", video],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+        streams = json.loads(r.stdout or b"{}").get("streams", [])
+        atts = [s for s in streams if s.get("codec_type") == "attachment"]
+        if not atts:
+            return {}
+        # ගොනු නම් අපි තීරණය කරනවා (Video එකේ Filename Tag එක විශ්වාස කරන්නෙ නෑ)
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+        for n in range(len(atts)):
+            cmd += [f"-dump_attachment:t:{n}", os.path.join(dest, f"emb_{n}.bin")]
+        cmd += ["-i", video, "-t", "0", "-f", "null", "-"]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+    except Exception as e:
+        log(f"      ⚠️  Embedded Fonts Extract අසාර්ථකයි: {e}")
+        return {}
+
+    from fontTools.ttLib import TTFont, TTCollection
+    fams = {}
+    for fn in sorted(os.listdir(dest)):
+        if not fn.startswith("emb_") or not fn.endswith(".bin"):
+            continue
+        p = os.path.join(dest, fn)
+        try:
+            with open(p, "rb") as fh:
+                magic = fh.read(4)
+            ext = {b"OTTO": ".otf", b"ttcf": ".ttc", b"\x00\x01\x00\x00": ".ttf", b"true": ".ttf"}.get(magic)
+            if not ext or os.path.getsize(p) > 30 * 1024 * 1024:
+                os.remove(p)       # Font එකක් නෙවෙයි
+                continue
+            np_ = p[:-4] + ext
+            os.replace(p, np_)
+            patch_font(np_)
+            obj = TTCollection(np_, lazy=True) if ext == ".ttc" else TTFont(np_, lazy=True)
+            for f in (obj.fonts if ext == ".ttc" else [obj]):
+                cm = f.getBestCmap() or {}
+                info = {"si": 0x0D9A in cm, "latin": 0x41 in cm and 0x61 in cm}
+                for rec in f["name"].names:
+                    if rec.nameID in (1, 4, 6, 16):
+                        try:
+                            nm = rec.toUnicode().strip().lower()
+                        except Exception:
+                            continue
+                        if nm:
+                            cur = fams.setdefault(nm, {"si": False, "latin": False})
+                            cur["si"] |= info["si"]
+                            cur["latin"] |= info["latin"]
+        except Exception as e:
+            log(f"      ⚠️  Embedded Font කියවන්න බැරි වුනා ({fn}): {e}")
+    return fams
 
 
 def patch_all_sinhala_fonts():
@@ -298,7 +354,7 @@ def installed_families():
 
 # සිංහල "පිල්ලම්" (Dependent vowel signs, Virama, ZWJ ...) — Karaoke Tag එකකින් වෙන් වුනොත්
 # libass වලට Shape කරන්න බැරි වෙලා තනි ◌ ලකුණක් විදිහට පෙන්නනවා. ඒවා කලින් Syllable එකටම ඈඳනවා.
-SI_MARKS = set("ංඃ්‍‌") | {chr(c) for c in range(0x0dcf, 0x0de0)} | {"ෲ", "ෳ"}
+SI_MARKS = set("ංඃ්") | {chr(c) for c in range(0x0dcf, 0x0de0)} | {"ෲ", "ෳ"}
 ZWJ = "‍"
 HAS_SINHALA = re.compile("[඀-෿]")
 
@@ -330,7 +386,9 @@ def read_text_file(path):
         return raw.decode("latin-1")
 
 
-def prep_ass(src, dst):
+def prep_ass(src, dst, emb=None):
+    """emb: වීඩියෝව ඇතුළේ Embed කරපු Fonts ({family(lower): {"si", "latin"}}). ඒවා Install කරපු ඒවා වගේම ගන්නවා."""
+    emb = emb or {}
     text = read_text_file(src)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
@@ -363,11 +421,18 @@ def prep_ass(src, dst):
     fams = installed_families()
     si_font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else "Noto Sans"
     latin_font = "Noto Sans" if "noto sans" in fams else si_font
-    replaced, spacing_fixed = set(), set()
+    replaced, spacing_fixed, used_emb = set(), set(), set()
+    en_override = {}   # සිංහල Style එකක English-only Line වලට යෙදිය යුතු Embedded English Font
 
     def fix(name, sinhala):
         clean = name.strip().lstrip("@")
-        if not clean or clean.lower() in fams:
+        if not clean:
+            return name
+        e = emb.get(clean.lower())
+        if e and e["si" if sinhala else "latin"]:
+            used_emb.add(clean)       # වීඩියෝවේ Font එකම පාවිච්චි කරනවා
+            return name
+        if clean.lower() in fams:
             return name
         replaced.add(clean)
         return si_font if sinhala else latin_font
@@ -387,7 +452,12 @@ def prep_ass(src, dst):
             parts = body.lstrip().split(",")
             if len(parts) > font_idx:
                 is_si = parts[name_idx].strip().lstrip("*").lower() in si_styles
-                parts[font_idx] = fix(parts[font_idx], is_si)
+                orig_font = parts[font_idx]
+                parts[font_idx] = fix(orig_font, is_si)
+                e = emb.get(orig_font.strip().lstrip("@").lower())
+                if is_si and parts[font_idx] != orig_font and e and e["latin"]:
+                    # Font එකේ සිංහල නෑ -> Style එකට සිංහල Font. නමුත් English Lines වලට වීඩියෝවේ Font එකම.
+                    en_override[parts[name_idx].strip().lstrip("*").lower()] = orig_font.strip().lstrip("@")
                 # Letter-spacing ≠ 0 නම් libass සිංහල Shaping කැඩෙනවා (ෙ ො ේ වැරදි තැනට යනවා)
                 if is_si and 0 <= sp_idx < len(parts):
                     try:
@@ -399,6 +469,15 @@ def prep_ass(src, dst):
                 lines[n] = head + ": " + ",".join(parts)
         elif sec.startswith("[events") and low.startswith(("dialogue:", "comment:")):
             sinhala = bool(HAS_SINHALA.search(line))
+            if en_override and not sinhala and low.startswith("dialogue:") and ev_cols:
+                head, body = line.split(":", 1)
+                parts = body.lstrip().split(",", text_idx)
+                st_idx = ev_cols.index("style") if "style" in ev_cols else 3
+                font = en_override.get(parts[st_idx].strip().lstrip("*").lower()) if len(parts) > text_idx else None
+                if font:
+                    parts[text_idx] = "{\\fn" + font + "}" + parts[text_idx]
+                    line = head + ": " + ",".join(parts)
+                    used_emb.add(font)
             if "\\fn" in line:
                 line = re.sub(r"\\fn([^\\}]+)", lambda m: "\\fn" + fix(m.group(1), sinhala), line)
             if sinhala and "\\fsp" in line:
@@ -407,7 +486,7 @@ def prep_ass(src, dst):
 
     with open(dst, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines))
-    return sorted(replaced), merged
+    return sorted(replaced), merged, sorted(used_emb)
 
 
 # ----------------------------------------------------------------------------
@@ -455,7 +534,7 @@ def target_bitrate(info, out_codec):
 
 
 async def encode(st, status, video, workdir, duration, venc, aenc, label):
-    vf = f"ass=sub.ass:fontsdir={FONT_DIR}:shaping=complex,format=yuv420p"
+    vf = "ass=sub.ass:fontsdir=vfonts:shaping=complex,format=yuv420p"   # vfonts = වීඩියෝවේ Fonts + User Fonts
     if st["fmt"] == "mkv":
         venc = [x for i, x in enumerate(venc) if x != "-tag:v" and not (i and venc[i - 1] == "-tag:v")]
         maps = ["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?",
@@ -858,7 +937,14 @@ async def process(uid):
                 n_ev = await asyncio.to_thread(srt_to_ass, st["ass"], sub_src, w, h)
                 if n_ev == 0:
                     raise RuntimeError("SRT ගොනුවෙන් Subtitle Lines කිසිවක් කියවන්න බැරි වුනා.")
-            replaced, merged = await asyncio.to_thread(prep_ass, sub_src, os.path.join(d, "sub.ass"))
+            vfonts = os.path.join(d, "vfonts")
+            emb = await asyncio.to_thread(extract_embedded_fonts, st["video"], vfonts)
+            if os.path.isdir(FONT_DIR):
+                for fn in os.listdir(FONT_DIR):
+                    if fn.lower().endswith(FONT_EXT) and not os.path.exists(os.path.join(vfonts, fn)):
+                        shutil.copy2(os.path.join(FONT_DIR, fn), vfonts)
+            replaced, merged, used_emb = await asyncio.to_thread(
+                prep_ass, sub_src, os.path.join(d, "sub.ass"), emb)
 
             copy_ok = all(a in ("aac", "mp3", "ac3", "eac3", "opus") for a in info["acodecs"])
             if st["fmt"] == "mkv":
@@ -911,6 +997,8 @@ async def process(uid):
             in_size = os.path.getsize(st["video"])
             note = (f"\n📉 Size: {hsize(in_size)} → <b>{hsize(fsize)}</b>"
                     f"\n🔤 සිංහල පිල්ලම් Fix කරපු Karaoke Lines: {merged}")
+            if used_emb:
+                note += f"\n🔠 වීඩියෝව ඇතුළේ Fonts පාවිච්චි කරා: {html.escape(', '.join(used_emb[:6]))}"
             if replaced:
                 shown = ", ".join(replaced[:6]) + (f" +{len(replaced) - 6} තවත්" if len(replaced) > 6 else "")
                 note += (f"\n\nℹ️ <i>Colab එකේ නැති Fonts ({html.escape(shown)}) Noto Sans වලට ආදේශ කරා. "
