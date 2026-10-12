@@ -14,9 +14,14 @@ import shutil
 import contextlib
 import subprocess
 import html
-import logging
 import codecs
 from pathlib import Path
+
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 import nest_asyncio
 import aria2p
@@ -809,47 +814,17 @@ def patch_all_sinhala_fonts():
 def setup_sinhala_fonts():
     os.makedirs(FONT_DIR, exist_ok=True)
 
-    # 1. Ensure fonttools is installed
-    try:
-        import fontTools
-    except ImportError:
-        try:
-            logger.info("📦 fonttools ස්ථාපනය වෙමින් පවතී...")
-            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "fonttools"], check=True)
-        except Exception as e:
-            logger.warning(f"fonttools install error: {e}")
-
-    # 2. Download Official Noto Sans Sinhala (Regular & Bold) if missing
-    font_urls = [
-        ("NotoSansSinhala-Regular.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Regular.ttf"),
-        ("NotoSansSinhala-Bold.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Bold.ttf")
-    ]
-    for fname, url in font_urls:
-        dst = os.path.join(FONT_DIR, fname)
-        if not os.path.exists(dst) or os.path.getsize(dst) < 1000:
-            try:
-                import urllib.request
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    with open(dst, "wb") as f_out:
-                        f_out.write(resp.read())
-                logger.info(f"✅ Sinhala Font බාගත කරගන්නා ලදී: {fname}")
-            except Exception as e:
-                logger.warning(f"Failed to fetch {fname}: {e}")
-
-    # 3. Remove glitchy lklug font if present so fontconfig never falls back to it
+    # 1. Remove glitchy lklug font if present so fontconfig never falls back to it
     for lklug_cand in [
         "/usr/share/fonts/truetype/sinhala/lklug.ttf",
         "/usr/share/fonts/truetype/lklug/lklug.ttf",
         os.path.join(FONT_DIR, "lklug.ttf")
     ]:
         if os.path.exists(lklug_cand):
-            try:
-                os.remove(lklug_cand)
-            except Exception:
-                pass
+            try: os.remove(lklug_cand)
+            except Exception: pass
 
-    # 4. Copy system Sinhala fonts (excluding lklug)
+    # 2. Copy system Sinhala fonts (excluding lklug)
     try:
         res = subprocess.run("fc-list | grep -i sinhala | cut -d: -f1", shell=True, stdout=subprocess.PIPE, text=True)
         if res.stdout.strip():
@@ -861,6 +836,30 @@ def setup_sinhala_fonts():
                         shutil.copy2(f, dst)
     except Exception as e:
         logger.warning(f"fc-list scan error: {e}")
+
+    # 3. If still no sinhala font in FONT_DIR, try fetching Noto Sans Sinhala
+    has_fonts = any(f.lower().endswith((".ttf", ".otf", ".ttc")) for f in os.listdir(FONT_DIR))
+    if not has_fonts:
+        font_urls = [
+            ("NotoSansSinhala-Regular.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Regular.ttf"),
+            ("NotoSansSinhala-Bold.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Bold.ttf")
+        ]
+        for fname, url in font_urls:
+            dst = os.path.join(FONT_DIR, fname)
+            if not os.path.exists(dst) or os.path.getsize(dst) < 1000:
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        with open(dst, "wb") as f_out:
+                            f_out.write(resp.read())
+                    logger.info(f"✅ Sinhala Font බාගත කරගන්නා ලදී: {fname}")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch {fname}: {e}")
+
+    # 4. Patch all fonts to remove dotted circle
+    cnt = patch_all_sinhala_fonts()
+    logger.info(f"✅ Sinhala Fonts සූදානම් (Fonts {cnt} ක ◌ Dotted circle ඉවත් කරන ලදී)")
 
     # 5. Patch all fonts to remove dotted circle
     try:
@@ -2357,20 +2356,25 @@ async def heartbeat_loop(websocket):
 async def main():
     global app, user_app, upload_client, aria2_api
     
-    print("\n" + "=" * 62)
-    print("🚀 COLAB WORKER v4.0 [Sinhala Subtitle & 4K Engine ACTIVE] 🚀")
-    print("=" * 62 + "\n")
+    key = str(random.randint(100000, 999999))
+    print("\n" + "=" * 65, flush=True)
+    print("🚀 COLAB WORKER v4.0 [Sinhala Subtitle & 4K Engine ACTIVE] 🚀", flush=True)
+    print(f"🔑 YOUR CONNECTION KEY IS: {key}", flush=True)
+    print("=" * 65 + "\n", flush=True)
     
-    setup_sinhala_fonts()
     aria2_api = aria2p.API(aria2p.Client(host="http://localhost", port=6800, secret=""))
     subprocess.Popen(["aria2c", "--enable-rpc=true", "--rpc-listen-all=false", "--rpc-listen-port=6800", "--daemon=true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
-    key = str(random.randint(100000, 999999))
-    print(f"YOUR CONNECTION KEY IS: {key}")
+    try:
+        setup_sinhala_fonts()
+    except Exception as fe:
+        logger.warning(f"Font setup error: {fe}")
     
+    print(f"📡 Connecting to Master Server ({MASTER_WS_URL})...", flush=True)
     try:
         async with websockets.connect(MASTER_WS_URL) as ws:
             await ws.send(key)
+            print(f"✅ Key {key} sent to Master! Now send /connect {key} in your Telegram bot.", flush=True)
             response = await ws.recv()
             data = json.loads(response)
             
