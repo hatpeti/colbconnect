@@ -1,33 +1,845 @@
-# -*- coding: utf-8 -*-
-# ============================================================================
-#  🎬 Sinhala ASS Karaoke Burner Bot  —  Google Colab (T4 GPU / NVENC)
-#  මේ සම්පූර්ණ Code එක Colab Cell එකකට Paste කරල Run කරන්න.
-#  Runtime -> Change runtime type -> T4 GPU තෝරන්න.
-# ============================================================================
-import os, sys, subprocess, shutil, time
+import asyncio
+import os
+import sys
+import websockets
+import json
+import random
+import re
+import time
+import math
+import hashlib
+import mimetypes
+import glob
+import shutil
+import contextlib
+import subprocess
+import html
+import codecs
+import logging
+from pathlib import Path
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8527387193:AAH46AGz1RJOJ6zd5at59Z_msIUuytcKDGc")
-API_ID = int(os.getenv("API_ID", 38017568))
-API_HASH = os.getenv("API_HASH", "edce8874495cfda158be92a333fa4823")
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
-WORK_ROOT = "/content/work" if os.path.isdir("/content") else os.path.abspath("work")
+def install_everything():
+    print("=" * 65, flush=True)
+    print("🚀  Sinhala ASS Karaoke Burner Worker  —  Setup පටන් ගන්නවා", flush=True)
+    print("=" * 65, flush=True)
+
+    print("\n[1/4] 🖥️  GPU පරීක්ෂා කරනවා ...", flush=True)
+    g = subprocess.run("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader",
+                       shell=True, stdout=subprocess.PIPE, text=True)
+    if g.returncode == 0 and g.stdout.strip():
+        print(f"      ✅ GPU හමුවුනා: {g.stdout.strip()}", flush=True)
+    else:
+        print("      ⚠️  GPU හමු වුනේ නෑ! Runtime -> Change runtime type -> T4 GPU දාන්න.", flush=True)
+        print("          (දැනට CPU වලින් Encode කරනවා)", flush=True)
+
+    print("\n[2/4] 📦 FFmpeg + සිංහල Fonts Install වෙනවා (විනාඩියක් විතර යනවා) ...", flush=True)
+    need_apt = (not shutil.which("ffmpeg")) or (not shutil.which("fc-list")) or (not shutil.which("aria2c")) or \
+               ("sinhala" not in (subprocess.run("fc-list", shell=True, stdout=subprocess.PIPE, text=True).stdout or "").lower())
+    if need_apt:
+        subprocess.run("apt-get -qq update", shell=True)
+        r = subprocess.run("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg fontconfig aria2 "
+                           "fonts-noto-core fonts-lklug-sinhala", shell=True)
+        if r.returncode != 0:
+            print("      ❌ apt install අසාර්ථකයි.", flush=True)
+    print("      ✅ FFmpeg + Sinhala Fonts + Aria2 සූදානම්", flush=True)
+
+    print("\n[3/4] 🐍 Python Libraries Install වෙනවා ...", flush=True)
+    for pkg in ("wzgram", "websockets", "nest_asyncio", "aria2p", "fonttools", "tgcrypto"):
+        try:
+            __import__(pkg)
+            print(f"      ✅ {pkg} OK", flush=True)
+        except ImportError:
+            print(f"      ⏳ {pkg} ...", flush=True)
+            r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", pkg])
+            if r.returncode != 0:
+                print(f"      ⚠️  {pkg} Install වුනේ නෑ", flush=True)
+            else:
+                print(f"      ✅ {pkg} OK", flush=True)
+
+    print("\n[4/4] 🎞️  Sinhala Fonts සකස් කර ◌ (Dotted circle) ඉවත් කරනවා ...", flush=True)
+    font_dir = os.path.expanduser("~/.fonts")
+    os.makedirs(font_dir, exist_ok=True)
+    for lklug_cand in [
+        "/usr/share/fonts/truetype/sinhala/lklug.ttf",
+        "/usr/share/fonts/truetype/lklug/lklug.ttf",
+        os.path.join(font_dir, "lklug.ttf")
+    ]:
+        if os.path.exists(lklug_cand):
+            try: os.remove(lklug_cand)
+            except Exception: pass
+    subprocess.run(f"cp -n $(fc-list | grep -i sinhala | cut -d: -f1) {font_dir}/ 2>/dev/null", shell=True)
+    subprocess.run("fc-cache -f", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        from fontTools.ttLib import TTFont, TTCollection
+        for fn in os.listdir(font_dir):
+            if fn.lower().endswith((".ttf", ".otf", ".ttc")):
+                p = os.path.join(font_dir, fn)
+                try:
+                    is_ttc = p.lower().endswith(".ttc")
+                    obj = TTCollection(p, lazy=False) if is_ttc else TTFont(p, lazy=False)
+                    ch = False
+                    for f in (obj.fonts if is_ttc else [obj]):
+                        cm = f.getBestCmap() or {}
+                        if 0x0D9A in cm and 0x25CC in cm:
+                            for t in f["cmap"].tables:
+                                t.cmap.pop(0x25CC, None)
+                            ch = True
+                    if ch:
+                        obj.save(p + ".tmp")
+                        os.replace(p + ".tmp", p)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    print("      ✅ සිංහල Fonts වල ◌ (Dotted circle) ඉවත් කරා — පිල්ලම් කැඩෙන එක නවතී", flush=True)
+    print("=" * 65 + "\n", flush=True)
+
+if os.path.isdir("/content") or "COLAB_GPU" in os.environ or os.environ.get("RUN_INSTALL"):
+    install_everything()
+
+import nest_asyncio
+import aria2p
+
+from wzgram import Client, filters, enums, raw
+from wzgram.handlers import MessageHandler, CallbackQueryHandler
+from wzgram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from wzgram.errors import FloodWait, RPCError
+
+nest_asyncio.apply()
+logging.getLogger("wzgram").setLevel(logging.ERROR)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Reduce wzgram's internal retry count from 10 to 3
+# This prevents hammering DC5 with rapid-fire GetFile requests
+# Our outer retry loop handles reconnection with fresh file_reference instead
+try:
+    from wzgram.session import Session
+    Session.MAX_RETRIES = 3
+    logger.info("wzgram Session.MAX_RETRIES set to 3")
+except Exception:
+    pass
+
+MASTER_WS_URL = "wss://worker-production-d47f.up.railway.app"
+TARGET_CHANNEL = "@animedubsinhla"
+WATERMARK = "@animesinhala1"
+
+app = None
+user_app = None
+upload_client = None
+aria2_api = None
+
+DOWNLOAD_MAX_RETRIES = 8
+UPLOAD_MAX_RETRIES = 5
+
+# Settings & Concurrency
+CONCURRENCY_LIMIT = 4
+TASK_SEMAPHORE = asyncio.Semaphore(CONCURRENCY_LIMIT)
+PART_SIZE = 512 * 1024
+UPLOAD_WORKERS = 8
+PART_RETRIES = 8
+UI_INTERVAL = 3.0
+MAX_FILE_SIZE = 4000 * 1024 * 1024
+BIG_FILE_THRESHOLD = 10 * 1024 * 1024
+SESSION_DIR = "/content/telegram_sessions"
+os.makedirs(SESSION_DIR, exist_ok=True)
+THUMB_DIR = "/content/bot_thumbnail"
+os.makedirs(THUMB_DIR, exist_ok=True)
+CUSTOM_THUMB_PATH = os.path.join(THUMB_DIR, "custom_thumb.jpg")
 FONT_DIR = os.path.expanduser("~/.fonts")
+os.makedirs(FONT_DIR, exist_ok=True)
 
+# Global State Tracker
+ACTIVE_TASKS = {}
+STATUS_MESSAGES = {}
+cancel_flags = {}
+upload_runtime = {}
+current_tasks = {}
+pending_sub_replies = {}
+pending_audio_replies = {}
+pending_renames = {}
+pending_hardsub_wizard = {}
 
-def log(msg):
-    print(msg, flush=True)
+_prev_cpu_times = [0.0, 0.0]
 
+# --- SYSTEM STATS & FORMATTING HELPERS ---
+def get_system_stats():
+    global _prev_cpu_times
+    cpu_pct = 0.0
+    try:
+        with open("/proc/stat", "r") as f:
+            fields = [float(x) for x in f.readline().split()[1:8]]
+        idle = fields[3] + fields[4]
+        total = sum(fields)
+        idle_delta = idle - _prev_cpu_times[0]
+        total_delta = total - _prev_cpu_times[1]
+        _prev_cpu_times = [idle, total]
+        if total_delta > 0:
+            cpu_pct = round(100.0 * (1.0 - idle_delta / total_delta), 1)
+    except:
+        cpu_pct = 0.0
 
-def sh(cmd, quiet=True):
-    r = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE,
-                       stderr=subprocess.STDOUT, text=True)
-    if r.returncode != 0 and not quiet:
-        log(r.stdout[-800:])
-    return r
+    ram_pct = 0.0
+    try:
+        mem = {}
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    mem[parts[0].strip()] = float(parts[1].split()[0])
+        total_mem = mem.get("MemTotal", 1.0)
+        avail_mem = mem.get("MemAvailable", mem.get("MemFree", 0.0))
+        used_mem = total_mem - avail_mem
+        ram_pct = round((used_mem / total_mem) * 100, 1)
+    except:
+        ram_pct = 0.0
 
+    disk_free_str, disk_pct = "0 GB", 0.0
+    try:
+        path = "/content" if os.path.exists("/content") else "."
+        total_b, used_b, free_b = shutil.disk_usage(path)
+        disk_pct = round((used_b / total_b) * 100, 1)
+        disk_free_str = format_bytes(free_b)
+    except:
+        pass
+
+    uptime_str = "0m"
+    try:
+        with open("/proc/uptime", "r") as f:
+            up_secs = float(f.read().split()[0])
+        d = int(up_secs // 86400)
+        h = int((up_secs % 86400) // 3600)
+        m = int((up_secs % 3600) // 60)
+        if d > 0: uptime_str = f"{d}d {h}h {m}m"
+        elif h > 0: uptime_str = f"{h}h {m}m"
+        else: uptime_str = f"{m}m"
+    except:
+        uptime_str = "N/A"
+
+    return cpu_pct, disk_free_str, disk_pct, ram_pct, uptime_str
+
+_gpu_encoder_cache = {}
+
+def check_gpu():
+    try: return subprocess.run(["nvidia-smi"], capture_output=True, text=True).returncode == 0
+    except: return False
+
+def check_gpu_encoder(codec="h264_nvenc"):
+    """Check if specific NVENC encoder actually works with the installed driver."""
+    if codec in _gpu_encoder_cache:
+        return _gpu_encoder_cache[codec]
+    if not check_gpu():
+        _gpu_encoder_cache[codec] = False
+        return False
+    try:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+               "color=c=black:s=64x64:d=0.1", "-pix_fmt", "yuv420p", "-c:v", codec, "-f", "null", "-"]
+        ok = (subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
+        _gpu_encoder_cache[codec] = ok
+        if not ok:
+            logger.warning(f"⚠️ GPU NVENC ({codec}) is not compatible with current driver. Falling back to CPU encoder.")
+        else:
+            logger.info(f"✅ GPU NVENC ({codec}) verified and working.")
+        return ok
+    except Exception as e:
+        logger.warning(f"Error testing encoder {codec}: {e}")
+        _gpu_encoder_cache[codec] = False
+        return False
+
+def format_bytes(size):
+    try: size = float(size)
+    except: size = 0.0
+    if size <= 0: return "0 B"
+    units = ("B", "KB", "MB", "GB", "TB", "PB")
+    i = min(int(math.floor(math.log(size, 1024))), len(units) - 1)
+    value = size / (1024 ** i)
+    if value >= 10: return f"{value:.1f} {units[i]}"
+    return f"{value:.2f} {units[i]}"
+
+def format_mbps(bytes_per_second):
+    return f"{(bytes_per_second * 8) / 1_000_000:.2f} Mbps"
+
+def format_time(seconds):
+    try: seconds = max(0, int(seconds))
+    except: seconds = 0
+    if seconds == 0: return "0s"
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h > 0: return f"{h}h {m}m {s}s"
+    if m > 0: return f"{m}m {s}s"
+    return f"{s}s"
+
+def make_progress_bar(percentage):
+    pct = max(0.0, min(100.0, percentage))
+    filled = int(round(pct / 10))
+    bar = "■" * filled + "□" * (10 - filled)
+    return bar, pct
+
+def safe_html(text): return html.escape(str(text), quote=False)
+
+def get_mime_type(path): return mimetypes.guess_type(path)[0] or "application/octet-stream"
+
+# --- RETRY HELPERS FOR DOWNLOAD & UPLOAD ---
+async def download_with_retry(client, message, file_name, chat_id=None, msg_id=None, progress=None, max_retries=DOWNLOAD_MAX_RETRIES):
+    """Download a Telegram file with retry logic.
+    
+    Key fix: On each retry attempt:
+    1. Restart the client session (force new DC connection)
+    2. Re-fetch the message via get_messages() for fresh file_reference
+    3. Wait with exponential backoff for Telegram servers to recover
+    
+    file_reference expires quickly on Telegram. If we keep retrying with the
+    same stale reference, every attempt will fail with -503 Timeout.
+    """
+    last_error = None
+    current_msg = message
+    
+    # Log file info for debugging
+    media = message.document or message.video
+    if media:
+        dc_id = getattr(media, "dc_id", "?")
+        file_size = getattr(media, "file_size", 0)
+        file_ref = getattr(media, "file_reference", None)
+        ref_hex = file_ref[:8].hex() + "..." if file_ref and len(file_ref) > 8 else str(file_ref)
+        logger.info(f"📋 File info: DC={dc_id}, size={format_bytes(file_size)}, ref={ref_hex}")
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"Download attempt {attempt}/{max_retries} for {os.path.basename(file_name)}")
+            
+            # On retry (attempt > 1): restart session + re-fetch message for fresh file_reference
+            if attempt > 1:
+                # Send diagnostic to chat so user can see progress
+                if chat_id:
+                    with contextlib.suppress(Exception):
+                        await client.send_message(
+                            chat_id,
+                            f"🔄 <b>Download retry {attempt}/{max_retries}</b>\n"
+                            f"├ Refreshing connection & file reference...\n"
+                            f"└ Previous error: <code>{safe_html(str(last_error)[:150])}</code>",
+                            parse_mode=enums.ParseMode.HTML
+                        )
+                
+                # 1. Restart client to force new DC connection
+                try:
+                    if client.is_connected:
+                        logger.info("Restarting client session for fresh connection...")
+                        await client.restart()
+                    else:
+                        logger.info("Client disconnected, starting fresh...")
+                        await client.start()
+                    logger.info("Client session restarted successfully")
+                except Exception as rc_err:
+                    logger.warning(f"Session restart failed: {rc_err}, trying start()...")
+                    try:
+                        await client.start()
+                    except Exception:
+                        pass
+                
+                # 2. Re-fetch message for fresh file_reference
+                if chat_id and msg_id:
+                    try:
+                        fresh_msg = await client.get_messages(chat_id, msg_id)
+                        if fresh_msg and (fresh_msg.document or fresh_msg.video):
+                            current_msg = fresh_msg
+                            fresh_media = fresh_msg.document or fresh_msg.video
+                            new_ref = getattr(fresh_media, "file_reference", None)
+                            new_hex = new_ref[:8].hex() + "..." if new_ref and len(new_ref) > 8 else "None"
+                            logger.info(f"✅ Fresh file_reference: {new_hex}")
+                        else:
+                            logger.warning(f"Re-fetched message {msg_id} but no media found")
+                    except Exception as gm_err:
+                        logger.warning(f"Failed to re-fetch message: {gm_err}")
+                
+                # 3. Clean up any partial download from previous attempt
+                if os.path.exists(file_name):
+                    with contextlib.suppress(Exception): os.remove(file_name)
+            else:
+                # First attempt: just check connection
+                if not client.is_connected:
+                    logger.warning("Client disconnected, reconnecting...")
+                    try:
+                        await client.start()
+                    except Exception as rc_err:
+                        logger.warning(f"Reconnect failed: {rc_err}")
+            
+            path = await client.download_media(current_msg, file_name=file_name, progress=progress)
+            if path and os.path.exists(path):
+                file_size = os.path.getsize(path)
+                expected_size = getattr(current_msg.document or current_msg.video, "file_size", 0)
+                if expected_size > 0 and file_size < expected_size * 0.95:
+                    logger.warning(f"Incomplete download: {file_size} / {expected_size} bytes")
+                    with contextlib.suppress(Exception): os.remove(path)
+                    raise Exception(f"Incomplete download: got {format_bytes(file_size)}, expected {format_bytes(expected_size)}")
+                logger.info(f"✅ Download successful: {path} ({format_bytes(file_size)})")
+                return path
+            raise Exception("Download returned None or file does not exist")
+        except asyncio.CancelledError:
+            raise
+        except FloodWait as fw:
+            wait = min(int(getattr(fw, "value", 5)), 120)
+            logger.warning(f"FloodWait during download: sleeping {wait}s")
+            await asyncio.sleep(wait)
+        except Exception as e:
+            last_error = e
+            logger.warning(f"❌ Download attempt {attempt}/{max_retries} failed: {e}")
+            if attempt == max_retries:
+                break
+            # Longer backoff to let DC5 cooldown: 30s, 60s, 120s, 180s, 180s...
+            wait_time = min(30 * (2 ** (attempt - 1)), 180)
+            logger.info(f"⏳ Waiting {wait_time}s before retry (fresh session + file_reference)...")
+            await asyncio.sleep(wait_time)
+    raise Exception(f"Download failed after {max_retries} attempts. Last error: {last_error}")
+
+async def upload_with_retry(client, chat_id, f_path, f_name, thumb, progress=None, max_retries=UPLOAD_MAX_RETRIES, as_video=False, width=1280, height=720, duration=0):
+    """Upload a file to Telegram with retry logic. Can upload as Streamable Video or Document.
+    Supports up to 4GB files via Premium user session and avoids sending duplicate/unwanted messages to Saved Messages."""
+    global user_app, upload_client, app
+    last_error = None
+
+    file_size = os.path.getsize(f_path) if os.path.exists(f_path) else 0
+    is_large = file_size > (2000 * 1024 * 1024)
+
+    # Use user_app (Premium session) for >2GB files, or bot client for standard <=2GB files
+    uploader = user_app if (is_large and user_app and user_app.is_connected) else (app or client)
+
+    # Identify user_app's own ID to detect if sending to chat_id would land in Saved Messages
+    user_app_id = None
+    if user_app and user_app.is_connected:
+        try:
+            user_app_id = getattr(user_app, "me", None) and user_app.me.id
+            if not user_app_id:
+                me_obj = await user_app.get_me()
+                user_app_id = me_obj.id
+        except Exception:
+            pass
+
+    # When uploading via user_app, if chat_id is the user_app's own ID (which routes to "Saved Messages"),
+    # upload to TARGET_CHANNEL directly to prevent cluttering Saved Messages, then deliver to the user chat via bot.
+    upload_target = chat_id
+    needs_channel_redirect = False
+    if uploader == user_app and user_app_id and str(chat_id) in [str(user_app_id), "me", "self"]:
+        upload_target = TARGET_CHANNEL
+        needs_channel_redirect = True
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"Upload attempt {attempt}/{max_retries} for {f_name} (as_video={as_video}, target={upload_target}, is_large={is_large})")
+            if as_video:
+                try:
+                    msg = await uploader.send_video(
+                        chat_id=upload_target,
+                        video=f_path,
+                        thumb=thumb,
+                        caption=f"<code>{f_name}</code>",
+                        supports_streaming=True,
+                        width=int(width or 1280),
+                        height=int(height or 720),
+                        duration=int(duration or 0),
+                        progress=progress
+                    )
+                except Exception as vid_err:
+                    logger.warning(f"send_video failed ({vid_err}), falling back to send_document")
+                    msg = await uploader.send_document(
+                        chat_id=upload_target,
+                        document=f_path,
+                        thumb=thumb,
+                        caption=f"<code>{f_name}</code>",
+                        force_document=True,
+                        progress=progress
+                    )
+            else:
+                msg = await uploader.send_document(
+                    chat_id=upload_target,
+                    document=f_path,
+                    thumb=thumb,
+                    caption=f"<code>{f_name}</code>",
+                    force_document=True,
+                    progress=progress
+                )
+
+            logger.info(f"Upload successful: {f_name}")
+
+            # If we redirected 4GB upload to TARGET_CHANNEL to prevent sending to Saved Messages:
+            if needs_channel_redirect and msg:
+                bot_client = app or client
+                delivered_msg = None
+                try:
+                    delivered_msg = await bot_client.copy_message(
+                        chat_id=chat_id,
+                        from_chat_id=TARGET_CHANNEL,
+                        message_id=msg.id
+                    )
+                except Exception as cp_err:
+                    logger.warning(f"Bot copy_message failed ({cp_err}), trying forward_messages")
+                    try:
+                        fwd = await bot_client.forward_messages(
+                            chat_id=chat_id,
+                            from_chat_id=TARGET_CHANNEL,
+                            message_ids=msg.id
+                        )
+                        delivered_msg = fwd[0] if isinstance(fwd, list) else fwd
+                    except Exception as fwd_err:
+                        logger.warning(f"Bot forward_messages failed ({fwd_err}), sending channel link")
+                        channel_user = str(TARGET_CHANNEL).lstrip('@')
+                        link = f"https://t.me/{channel_user}/{msg.id}"
+                        delivered_msg = await bot_client.send_message(
+                            chat_id=chat_id,
+                            text=f"✅ <b>4GB File Uploaded to Channel:</b>\n🎬 <a href='{link}'><code>{f_name}</code></a>",
+                            parse_mode=enums.ParseMode.HTML
+                        )
+                if delivered_msg:
+                    setattr(delivered_msg, "_already_in_target_channel", True)
+                return delivered_msg or msg
+
+            return msg
+        except asyncio.CancelledError:
+            raise
+        except FloodWait as fw:
+            wait = min(int(getattr(fw, "value", 5)), 60)
+            logger.warning(f"FloodWait during upload: sleeping {wait}s")
+            await asyncio.sleep(wait)
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Upload attempt {attempt}/{max_retries} failed: {e}")
+            if attempt == max_retries:
+                break
+            wait_time = min(2 ** attempt * 3, 60)
+            logger.info(f"Retrying upload in {wait_time}s...")
+            await asyncio.sleep(wait_time)
+    raise Exception(f"Upload failed after {max_retries} attempts. Last error: {last_error}")
+
+def parse_selection(selection_str, max_idx):
+    if selection_str.lower() == "all": return list(range(1, max_idx + 1))
+    indices = []
+    for part in selection_str.split(","):
+        part = part.strip()
+        if "-" in part:
+            try:
+                start, end = part.split("-", 1)
+                start, end = int(start.strip()), int(end.strip())
+                step = 1 if start <= end else -1
+                for idx in range(start, end + step, step):
+                    if 1 <= idx <= max_idx and idx not in indices:
+                        indices.append(idx)
+            except: pass
+        elif part.isdigit():
+            idx = int(part)
+            if 1 <= idx <= max_idx and idx not in indices:
+                indices.append(idx)
+    return indices
+
+def build_file_tree(files, is_html=True):
+    tree = {}
+    for i, f in enumerate(files):
+        parts = Path(f.path).parts
+        current = tree
+        for i_part, part in enumerate(parts):
+            if i_part == len(parts) - 1:
+                current[part] = {'index': i + 1, 'size': f.length}
+            else:
+                if part not in current: current[part] = {}
+                current = current[part]
+    def render_tree(node, prefix=""):
+        lines = []
+        keys = list(node.keys())
+        for idx, key in enumerate(keys):
+            is_last_item = (idx == len(keys) - 1)
+            connector = "└── " if is_last_item else "├── "
+            child_prefix = "    " if is_last_item else "│   "
+            val = node[key]
+            if isinstance(val, dict) and 'index' not in val:
+                lines.append(f"{prefix}{connector}📁 {html.escape(key) if is_html else key}")
+                lines.extend(render_tree(val, prefix + child_prefix))
+            else:
+                idx_str = f"[{val['index']}]"
+                if is_html: idx_str = f"<code>{idx_str}</code>"
+                lines.append(f"{prefix}{connector}📄 {idx_str} {html.escape(key) if is_html else key} ({val['size'] / (1024*1024):.2f} MB)")
+        return lines
+    return "\n".join(render_tree(tree))
+
+# --- GLOBAL PROGRESS UI LOOP ---
+async def ensure_status_message(chat_id):
+    if chat_id in STATUS_MESSAGES:
+        return STATUS_MESSAGES[chat_id]
+    try:
+        msg = await app.send_message(chat_id, "⏳ <b>Starting task...</b>", parse_mode=enums.ParseMode.HTML)
+        STATUS_MESSAGES[chat_id] = msg
+        return msg
+    except Exception as e:
+        logger.error(f"Error creating status message: {e}")
+        return None
+
+async def global_ui_loop():
+    while True:
+        await asyncio.sleep(UI_INTERVAL)
+        if not app or not app.is_connected:
+            continue
+
+        active_chats = set(task["chat_id"] for task in ACTIVE_TASKS.values())
+        
+        # Check registered status messages
+        for chat_id in list(STATUS_MESSAGES.keys()):
+            status_msg = STATUS_MESSAGES.get(chat_id)
+            if not status_msg: continue
+            
+            chat_tasks = [t for t in ACTIVE_TASKS.values() if t["chat_id"] == chat_id]
+            if not chat_tasks:
+                try:
+                    await status_msg.edit_text("✅ <b>All tasks completed!</b>", parse_mode=enums.ParseMode.HTML)
+                except: pass
+                STATUS_MESSAGES.pop(chat_id, None)
+                continue
+
+            # Render Global Progress Message
+            cpu_pct, disk_free, disk_pct, ram_pct, uptime = get_system_stats()
+            task_blocks = []
+
+            for idx, t in enumerate(chat_tasks, 1):
+                total = max(t.get("total", 1), 1)
+                current = max(0, t.get("current", 0))
+                pct = (current / total) * 100
+                bar, pct_clamped = make_progress_bar(pct)
+
+                if t.get("is_time", False):
+                    processed_str = f"{format_time(current)} of {format_time(total)}"
+                    speed_str = f"{t.get('speed', 0.0):.2f}x"
+                else:
+                    processed_str = f"{format_bytes(current)} of {format_bytes(total)}"
+                    speed_str = f"{format_bytes(t.get('speed', 0.0))}/s"
+
+                eta_str = format_time(t.get("eta", 0))
+                user_disp = t.get("user_mention", "User")
+                task_id = t.get("task_id", "")
+                fname = t.get("filename", "Unknown")
+
+                block = (
+                    f"Task #{idx} By 👤 {user_disp}\n"
+                    f"├ 🎬 <b>{safe_html(fname)}</b>\n"
+                    f"├ [{bar}] {pct_clamped:.2f}%\n"
+                    f"├ Processed → {processed_str}\n"
+                    f"├ Status → {t.get('status', 'Processing')}\n"
+                    f"├ Speed → {speed_str}\n"
+                    f"├ Time → {eta_str}\n"
+                    f"└ Stop → /cancel_{task_id}"
+                )
+                task_blocks.append(block)
+
+            stats_block = (
+                f"Bot Stats 🤖\n"
+                f"├ CPU → {cpu_pct}% | Disk → {disk_free} [{disk_pct}%]\n"
+                f"└ RAM → ram_pct: {ram_pct}% | UP → {uptime}"
+            )
+            # Fix stats line display
+            stats_block = (
+                f"<b>Bot Stats</b> 🤖\n"
+                f"├ CPU → {cpu_pct}% | Disk → {disk_free} [{disk_pct}%]\n"
+                f"└ RAM → {ram_pct}% | UP → {uptime}"
+            )
+
+            full_text = "\n\n".join(task_blocks) + "\n\n" + stats_block
+
+            try:
+                await status_msg.edit_text(full_text, parse_mode=enums.ParseMode.HTML)
+            except FloodWait as fw:
+                await asyncio.sleep(min(int(getattr(fw, "value", 2)), 30))
+            except Exception as e:
+                pass
+
+# --- MEDIA PROCESSING & WATERMARKING ---
+async def probe_media_streams(filepath):
+    cmd = ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", filepath]
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+    return json.loads(stdout.decode("utf-8", errors="ignore"))
+
+async def get_video_meta(filepath):
+    try:
+        info = await probe_media_streams(filepath)
+        duration = int(float(info.get("format", {}).get("duration", 1) or 1))
+        width, height = 1280, 720
+        for stream in info.get("streams", []):
+            if stream.get("codec_type") == "video":
+                width = int(stream.get("width", 1280) or 1280)
+                height = int(stream.get("height", 720) or 720)
+                break
+        return max(duration, 1), max(width, 1), max(height, 1)
+    except: return 1, 1280, 720
+
+async def get_thumbnail(filepath):
+    thumb_path = filepath + "_thumb.jpg"
+    try:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", "00:00:02", "-i", filepath, "-vf", "scale='min(320,iw)':-2", "-vframes", "1", "-q:v", "5", thumb_path]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await asyncio.wait_for(proc.communicate(), timeout=60)
+        if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0: return thumb_path
+    except: pass
+    return None
+
+async def fix_thumb_jpeg(image_path):
+    """Ensure downloaded thumbnail is a valid JPEG scaled appropriately for Telegram video preview."""
+    if not image_path or not os.path.exists(image_path):
+        return None
+    fixed_path = image_path + "_converted.jpg"
+    try:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", image_path, "-vf", "scale='min(320,iw)':-2", "-vframes", "1", "-q:v", "5", fixed_path]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await asyncio.wait_for(proc.communicate(), timeout=30)
+        if os.path.exists(fixed_path) and os.path.getsize(fixed_path) > 0:
+            return fixed_path
+    except Exception:
+        pass
+    return image_path
+
+async def apply_mkv_watermark(filepath, watermark=WATERMARK):
+    if not filepath.lower().endswith(".mkv"): return filepath
+    try:
+        probe = await probe_media_streams(filepath)
+        cmd = ["mkvpropedit", filepath, "--edit", "info", "--set", f"title={watermark}"]
+        v_c, a_c, s_c = 0, 0, 0
+        for stream in probe.get("streams", []):
+            ctype = stream.get("codec_type")
+            lang = stream.get("tags", {}).get("language", "")
+            name = f"{watermark} [{lang.upper()}]" if lang else watermark
+            if ctype == "video":
+                v_c += 1
+                cmd.extend(["--edit", f"track:v{v_c}", "--set", f"name={watermark}"])
+            elif ctype == "audio":
+                a_c += 1
+                cmd.extend(["--edit", f"track:a{a_c}", "--set", f"name={name}"])
+            elif ctype == "subtitle":
+                s_c += 1
+                cmd.extend(["--edit", f"track:s{s_c}", "--set", f"name={name}"])
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        await proc.communicate()
+    except Exception as e:
+        logger.error(f"Watermark error: {e}")
+    return filepath
+
+def generate_res_name(original_name, target_res):
+    name_without_ext = os.path.splitext(original_name)[0]
+    res_label = "2160p" if str(target_res).lower() in ["2160", "4k"] else f"{target_res}p"
+    def res_repl(m): return res_label.upper() if 'P' in m.group(0) else res_label.lower()
+    enc_base_name = re.sub(r'(?i)(1080p|720p|480p|2160p|4k|1080)', res_repl, name_without_ext)
+    if enc_base_name == name_without_ext: enc_base_name += f"_{res_label}"
+    return enc_base_name
+
+# --- FFMPEG & ENCODING OPERATIONS ---
+async def _run_ffmpeg_exec(cmd, input_path, output_path, total_duration, task_id, action_name, filename, cwd=None):
+    process = await asyncio.create_subprocess_exec(*cmd, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    start_time = time.time()
+    
+    if task_id in ACTIVE_TASKS:
+        ACTIVE_TASKS[task_id].update({
+            "status": action_name,
+            "filename": filename,
+            "total": total_duration,
+            "is_time": True,
+            "start_time": start_time
+        })
+
+    while True:
+        if cancel_flags.get(task_id):
+            process.terminate()
+            raise asyncio.CancelledError("Operation cancelled.")
+        line = await process.stdout.readline()
+        if not line: break
+        line = line.decode("utf-8").strip()
+        if line.startswith("out_time_us="):
+            try:
+                time_us = int(line.split("=")[1])
+                curr_sec = max(0, time_us / 1_000_000)
+                now = time.time()
+                elapsed = max(now - start_time, 0.001)
+                speed = curr_sec / elapsed
+                eta = max(total_duration - curr_sec, 0) / speed if speed > 0 else 0
+                if task_id in ACTIVE_TASKS:
+                    ACTIVE_TASKS[task_id].update({
+                        "current": curr_sec,
+                        "speed": speed,
+                        "eta": eta
+                    })
+            except: pass
+    await process.wait()
+    if process.returncode != 0:
+        err = await process.stderr.read()
+        return False, err.decode("utf-8", errors="ignore")
+    return True, ""
+
+async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action_name, filename, cwd=None):
+    ok, err_text = await _run_ffmpeg_exec(cmd, input_path, output_path, total_duration, task_id, action_name, filename, cwd=cwd)
+    if ok:
+        return os.path.exists(output_path)
+
+    # Auto-fallback from NVENC to CPU if NVENC failed due to driver/API/parameter mismatch
+    if any(k in err_text.lower() for k in ("nvenc", "driver does not support", "minimum required nvidia driver", "error while opening encoder", "function not implemented")):
+        logger.warning(f"⚠️ NVENC error detected, automatically retrying with CPU (libx264/libx265)...")
+        cpu_cmd = []
+        skip_next = False
+        for i, arg in enumerate(cmd):
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "h264_nvenc":
+                cpu_cmd.append("libx264")
+            elif arg == "hevc_nvenc":
+                cpu_cmd.append("libx265")
+            elif arg in ("-qp", "-cq"):
+                cpu_cmd.append("-crf")
+            elif arg == "-preset" and i + 1 < len(cmd) and str(cmd[i + 1]).startswith("p"):
+                cpu_cmd.extend(["-preset", "veryfast"])
+                skip_next = True
+            elif arg in ("-tune", "-rc", "-rc-lookahead", "-spatial-aq", "-temporal-aq"):
+                skip_next = True
+            else:
+                cpu_cmd.append(arg)
+        
+        if os.path.exists(output_path):
+            try: os.remove(output_path)
+            except Exception: pass
+            
+        action_cpu = action_name.replace("(GPU)", "(CPU)") if "(GPU)" in action_name else action_name + " (CPU)"
+        ok_cpu, err_cpu = await _run_ffmpeg_exec(cpu_cmd, input_path, output_path, total_duration, task_id, action_cpu, filename, cwd=cwd)
+        if ok_cpu:
+            return os.path.exists(output_path)
+        raise Exception(f"FFMPEG Failed (Both GPU & CPU):\n{err_cpu[-1000:]}")
+
+    raise Exception(f"FFMPEG Failed:\n{err_text[-1000:]}")
+
+async def encode_video(input_path, output_path, resolution, total_duration, task_id, filename, hevc_10bit=False):
+    has_nvenc = check_gpu_encoder("hevc_nvenc" if hevc_10bit else "h264_nvenc")
+    if resolution in [2160, "2160", "4k", "4K"]: scale, cq, crf = "scale=-2:'min(2160,ih)'", "26", "24"
+    elif resolution in [1080, "1080"]: scale, cq, crf = "scale=-2:'min(1080,ih)'", "30", "28"
+    elif resolution in [720, "720"]: scale, cq, crf = "scale=-2:'min(720,ih)'", "34", "32"
+    else: scale, cq, crf = "scale=-2:'min(480,ih)'", "38", "36"
+
+    res_display = "4K" if resolution in [2160, "2160", "4k", "4K"] else f"{resolution}p"
+    if hevc_10bit:
+        if has_nvenc:
+            vcodec = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-qp", cq, "-pix_fmt", "p010le"]
+            action = f"⚙️ Encoding {res_display} HEVC 10b (GPU)"
+        else:
+            vcodec = ["-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p10le"]
+            action = f"⚙️ Encoding {res_display} HEVC 10b (CPU)"
+    else:
+        if has_nvenc:
+            vcodec = ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-cq", cq, "-pix_fmt", "yuv420p"]
+            action = f"⚙️ Encoding {res_display} (GPU)"
+        else:
+            vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
+            action = f"⚙️ Encoding {res_display} (CPU)"
+
+    cmd = ["ffmpeg", "-y", "-hwaccel", "auto", "-i", input_path, "-vf", scale, *vcodec, "-c:a", "copy", "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?", "-map_chapters", "0", "-c:s", "copy", "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path]
+    return await run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action, filename)
 
 # ----------------------------------------------------------------------------
-#  1) AUTO INSTALL
+#  SINHALA SUBTITLE & FONT PROCESSING (Ported directly from bot.py)
 # ----------------------------------------------------------------------------
 def patch_font(path):
     """Font එකේ U+25CC (◌ Dotted circle) Glyph එක ඉවත් කරනවා.
@@ -48,315 +860,144 @@ def patch_font(path):
             tmp = path + ".tmp"
             obj.save(tmp)
             os.replace(tmp, path)
+            logger.info(f"✅ Font Patched (removed ◌): {os.path.basename(path)}")
         return changed
     except Exception as e:
-        log(f"      ⚠️  Font Patch අසාර්ථකයි ({os.path.basename(path)}): {e}")
+        logger.warning(f"Font Patch අසාර්ථකයි ({os.path.basename(path)}): {e}")
         return False
-
-
-def extract_embedded_fonts(video, dest):
-    """වීඩියෝව (MKV) ඇතුළේ Attachment විදිහට තියෙන Fonts `dest` එකට Extract කරලා,
-    ඒවායේ Family නම් -> {"si": සිංහල Glyphs තියෙනවද, "latin": English Glyphs තියෙනවද} Dict එකක් දෙනවා."""
-    os.makedirs(dest, exist_ok=True)
-    try:
-        r = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", video],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
-        streams = json.loads(r.stdout or b"{}").get("streams", [])
-        atts = [s for s in streams if s.get("codec_type") == "attachment"]
-        if not atts:
-            return {}
-        # ගොනු නම් අපි තීරණය කරනවා (Video එකේ Filename Tag එක විශ්වාස කරන්නෙ නෑ)
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
-        for n in range(len(atts)):
-            cmd += [f"-dump_attachment:t:{n}", os.path.join(dest, f"emb_{n}.bin")]
-        cmd += ["-i", video, "-t", "0", "-f", "null", "-"]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
-    except Exception as e:
-        log(f"      ⚠️  Embedded Fonts Extract අසාර්ථකයි: {e}")
-        return {}
-
-    from fontTools.ttLib import TTFont, TTCollection
-    fams = {}
-    for fn in sorted(os.listdir(dest)):
-        if not fn.startswith("emb_") or not fn.endswith(".bin"):
-            continue
-        p = os.path.join(dest, fn)
-        try:
-            with open(p, "rb") as fh:
-                magic = fh.read(4)
-            ext = {b"OTTO": ".otf", b"ttcf": ".ttc", b"\x00\x01\x00\x00": ".ttf", b"true": ".ttf"}.get(magic)
-            if not ext or os.path.getsize(p) > 30 * 1024 * 1024:
-                os.remove(p)       # Font එකක් නෙවෙයි
-                continue
-            np_ = p[:-4] + ext
-            os.replace(p, np_)
-            patch_font(np_)
-            obj = TTCollection(np_, lazy=True) if ext == ".ttc" else TTFont(np_, lazy=True)
-            for f in (obj.fonts if ext == ".ttc" else [obj]):
-                cm = f.getBestCmap() or {}
-                info = {"si": 0x0D9A in cm, "latin": 0x41 in cm and 0x61 in cm}
-                for rec in f["name"].names:
-                    if rec.nameID in (1, 4, 6, 16):
-                        try:
-                            nm = rec.toUnicode().strip().lower()
-                        except Exception:
-                            continue
-                        if nm:
-                            cur = fams.setdefault(nm, {"si": False, "latin": False})
-                            cur["si"] |= info["si"]
-                            cur["latin"] |= info["latin"]
-        except Exception as e:
-            log(f"      ⚠️  Embedded Font කියවන්න බැරි වුනා ({fn}): {e}")
-    return fams
 
 
 def patch_all_sinhala_fonts():
     n = 0
     files = set()
-    for line in sh("fc-list :lang=si file").stdout.splitlines():
-        files.add(line.split(":")[0].strip())
+    try:
+        res = subprocess.run("fc-list :lang=si file", shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in res.stdout.splitlines():
+            parts = line.split(":")
+            if parts:
+                files.add(parts[0].strip())
+    except Exception:
+        pass
     if os.path.isdir(FONT_DIR):
         files |= {os.path.join(FONT_DIR, x) for x in os.listdir(FONT_DIR)
                   if x.lower().endswith((".ttf", ".otf", ".ttc"))}
     for f in files:
         if f and os.path.isfile(f) and patch_font(f):
             n += 1
-    sh("fc-cache -f")
+    try:
+        subprocess.run(["fc-cache", "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
     return n
 
 
-def install_everything():
-    log("=" * 60)
-    log("🚀  Sinhala ASS Karaoke Burner Bot  —  Setup පටන් ගන්නවා")
-    log("=" * 60)
-
-    log("\n[1/4] 🖥️  GPU පරීක්ෂා කරනවා ...")
-    g = sh("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader")
-    if g.returncode == 0 and g.stdout.strip():
-        log(f"      ✅ GPU හමුවුනා: {g.stdout.strip()}")
-    else:
-        log("      ⚠️  GPU හමු වුනේ නෑ! Runtime -> Change runtime type -> T4 GPU දාන්න.")
-        log("          (දැනට CPU වලින් Encode කරනවා — ටිකක් ලෙමෙන්)")
-
-    log("\n[2/4] 📦 FFmpeg + සිංහල Fonts Install වෙනවා (විනාඩියක් විතර යනවා) ...")
-    need_apt = (not shutil.which("ffmpeg")) or (not shutil.which("fc-list")) or \
-               ("sinhala" not in sh("fc-list").stdout.lower())
-    if need_apt:
-        sh("apt-get -qq update")
-        r = sh("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg fontconfig "
-               "fonts-noto-core fonts-lklug-sinhala", quiet=False)
-        if r.returncode != 0:
-            log("      ❌ apt install අසාර්ථකයි.")
-            raise SystemExit(1)
-    log("      ✅ FFmpeg + Sinhala Fonts සූදානම්")
-
-    log("\n[3/4] 🐍 Python Libraries Install වෙනවා ...")
-    sh(f"{sys.executable} -m pip uninstall -y pyrogram")
-    for pkg in ("pyrofork", "tgcrypto", "nest_asyncio", "fonttools"):
-        log(f"      ⏳ {pkg} ...")
-        r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", pkg],
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        if r.returncode != 0:
-            log(f"      ⚠️  {pkg} Install වුනේ නෑ:\n{r.stdout[-500:]}")
-            if pkg == "pyrofork":
-                raise SystemExit(1)
-        else:
-            log(f"      ✅ {pkg} OK")
-
-    log("\n[4/4] 🎞️  NVENC (GPU Encoder) Test කරනවා ...")
+def setup_sinhala_fonts():
     os.makedirs(FONT_DIR, exist_ok=True)
-    sh(f"cp -n $(fc-list | grep -i sinhala | cut -d: -f1) {FONT_DIR}/ 2>/dev/null")
-    sh("fc-cache -f")
-    cnt = patch_all_sinhala_fonts()
-    log(f"      ✅ සිංහල Fonts {cnt} ක ◌ (Dotted circle) ඉවත් කරා — පිල්ලම් කැඩෙන එක නවතී")
 
+    # 1. Remove glitchy lklug font if present so fontconfig never falls back to it
+    for lklug_cand in [
+        "/usr/share/fonts/truetype/sinhala/lklug.ttf",
+        "/usr/share/fonts/truetype/lklug/lklug.ttf",
+        os.path.join(FONT_DIR, "lklug.ttf")
+    ]:
+        if os.path.exists(lklug_cand):
+            try: os.remove(lklug_cand)
+            except Exception: pass
 
-install_everything()
-
-import asyncio, json, re, html, codecs, math, threading, importlib.util
-import nest_asyncio
-
-nest_asyncio.apply()
-
-def speedup_upload_patch(workers=8):
-    """Pyrogram Upload එකේ Parallel Workers 4 → 8 කරනවා (Import කරන්න කලින්)."""
+    # 2. Copy system Sinhala fonts (excluding lklug)
     try:
-        spec = importlib.util.find_spec("pyrogram")
-        f = os.path.join(list(spec.submodule_search_locations)[0], "methods", "advanced", "save_file.py")
-        txt = open(f, encoding="utf-8").read()
-        new = re.sub(r"workers_count = \d+ if is_big else 1", f"workers_count = {workers} if is_big else 1", txt)
-        if new != txt:
-            open(f, "w", encoding="utf-8").write(new)
-        return "pyrogram" not in sys.modules
+        res = subprocess.run("fc-list | grep -i sinhala | cut -d: -f1", shell=True, stdout=subprocess.PIPE, text=True)
+        if res.stdout.strip():
+            for f in res.stdout.strip().splitlines():
+                f = f.strip()
+                if f and os.path.isfile(f) and not f.lower().endswith("lklug.ttf"):
+                    dst = os.path.join(FONT_DIR, os.path.basename(f))
+                    if not os.path.exists(dst):
+                        shutil.copy2(f, dst)
     except Exception as e:
-        log(f"      ⚠️  Upload Speed Patch අසාර්ථකයි: {e}")
-        return False
+        logger.warning(f"fc-list scan error: {e}")
 
+    # 3. If still no sinhala font in FONT_DIR, try fetching Noto Sans Sinhala
+    has_fonts = any(f.lower().endswith((".ttf", ".otf", ".ttc")) for f in os.listdir(FONT_DIR))
+    if not has_fonts:
+        font_urls = [
+            ("NotoSansSinhala-Regular.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Regular.ttf"),
+            ("NotoSansSinhala-Bold.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Bold.ttf")
+        ]
+        for fname, url in font_urls:
+            dst = os.path.join(FONT_DIR, fname)
+            if not os.path.exists(dst) or os.path.getsize(dst) < 1000:
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        with open(dst, "wb") as f_out:
+                            f_out.write(resp.read())
+                    logger.info(f"✅ Sinhala Font බාගත කරගන්නා ලදී: {fname}")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch {fname}: {e}")
 
-UPLOAD_PATCHED = speedup_upload_patch()
-if not UPLOAD_PATCHED:
-    log("      ℹ️  Upload Speed Patch එක සම්පූර්ණයෙන් ක්‍රියාත්මක වෙන්න Runtime -> Restart session කරලා ආයෙ Run කරන්න.")
+    # 4. Patch all fonts to remove dotted circle
+    cnt = patch_all_sinhala_fonts()
+    logger.info(f"✅ Sinhala Fonts සූදානම් (Fonts {cnt} ක ◌ Dotted circle ඉවත් කරන ලදී)")
 
-import logging
-logging.getLogger("pyrogram.session.session").setLevel(logging.ERROR)   # "Waiting for 1 seconds" Warnings
-from pyrogram import Client, filters, idle, StopTransmission
-from pyrogram.enums import ParseMode
-from pyrogram.file_id import FileId
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-# ----------------------------------------------------------------------------
-#  2) ENCODER DETECTION
-# ----------------------------------------------------------------------------
-# Output Size එක Original එකට ආසන්නව තියාගන්න Source Bitrate එක පාදක කරගන්නවා.
-# ලොකුවෙන් පෙනෙනවා නම් මේක අඩු කරන්න (උදා 1.1), Quality මදි නම් වැඩි කරන්න (උදා 1.5).
-QUALITY_BOOST = 1.3
-
-# /mod Command එකෙන් User කෙනෙක් කෙනෙක්ට වෙනස් කරගන්න පුළුවන්:
-#   "stream" -> MP4  + Telegram එකේම Direct Streaming (Video විදිහට) — Default
-#   "doc"    -> MKV  + Document විදිහට. ඔක්කොම Audio Tracks, Soft Subtitles, Fonts, Chapters ආරක්ෂා වෙනවා
-DEFAULT_MODE = "stream"
-MODES = {}   # user_id -> "stream" | "doc"
-MODE_FMT = {"stream": "mp4", "doc": "mkv"}
-
-
-def _v(b):  # "1234567" -> bits/sec string
-    return str(int(b))
-
-
-def _hevc_full(v, m, b):
-    return ["-c:v", "hevc_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr",
-            "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b),
-            "-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1", "-tag:v", "hvc1"]
-
-
-def _hevc_simple(v, m, b):
-    return ["-c:v", "hevc_nvenc", "-preset", "medium", "-rc", "vbr",
-            "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b), "-tag:v", "hvc1"]
-
-
-def _h264_nv(v, m, b):
-    return ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr",
-            "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b), "-profile:v", "high"]
-
-
-def _x264(v, m, b):
-    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-maxrate", _v(m), "-bufsize", _v(b)]
-
-
-# (label, output codec, builder)
-GPU_ENCODERS = [("hevc_nvenc (T4 GPU)", "hevc", _hevc_full),
-                ("hevc_nvenc (T4 GPU)", "hevc", _hevc_simple),
-                ("h264_nvenc (T4 GPU)", "h264", _h264_nv)]
-CPU_ENCODER = ("libx264 (CPU)", "h264", _x264)
-
-
-def detect_gpu_encoder():
-    for enc in GPU_ENCODERS:
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-               "color=c=black:s=640x360:d=0.5", "-pix_fmt", "yuv420p",
-               *enc[2](1_000_000, 1_600_000, 3_200_000), "-f", "null", "-"]
-        if subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0:
-            return enc
-    return None
-
-
-GPU_ENC = detect_gpu_encoder()
-if GPU_ENC:
-    log(f"      ✅ NVENC (T4 GPU Encoder) වැඩ — {GPU_ENC[0]} — ඉතා වේගවත් Encoding!")
-else:
-    log("      ⚠️  NVENC වැඩ නෑ — libx264 (CPU) භාවිතා කරනවා.")
-
-# ----------------------------------------------------------------------------
-#  3) HELPERS
-# ----------------------------------------------------------------------------
-VIDEO_EXT = (".mkv", ".mp4", ".avi", ".mov", ".webm", ".ts", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg")
-FONT_EXT = (".ttf", ".otf", ".ttc")
-SUB_EXT = (".ass", ".ssa", ".srt")
-
-S = {}                    # user_id -> session state
-GPU_LOCK = asyncio.Lock()  # එකවර Encode එකක් විතරයි
-
-
-class Cancelled(Exception):
-    pass
-
-
-def hsize(n):
-    n = float(n)
-    for u in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024 or u == "TB":
-            return f"{n:.2f} {u}" if u != "B" else f"{int(n)} B"
-        n /= 1024
-
-
-def htime(sec):
-    sec = max(0, int(sec))
-    h, r = divmod(sec, 3600)
-    m, s = divmod(r, 60)
-    return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
-
-
-def bar(pct, width=14):
-    pct = max(0.0, min(100.0, pct))
-    full = int(round(pct / 100 * width))
-    return "█" * full + "░" * (width - full)
-
-
-def render(icon, title, pct, lines):
-    return (f"{icon} <b>{title}</b>\n\n"
-            f"<code>[{bar(pct)}] {pct:5.1f}%</code>\n\n" + "\n".join(lines))
-
-
-async def safe_edit(msg, text):
+    # 5. Patch all fonts to remove dotted circle
     try:
-        await msg.edit_text(text, parse_mode=ParseMode.HTML)
+        subprocess.run(["fc-cache", "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+    cnt = patch_all_sinhala_fonts()
+    if cnt > 0:
+        logger.info(f"✅ සිංහල Fonts {cnt} ක ◌ (Dotted circle) ඉවත් කරා — පිල්ලම් කැඩෙන එක වැළකේ")
+        print(f"✅ Sinhala Subtitle Engine: {cnt} font(s) patched (Dotted circle removed).")
+    else:
+        print("✅ Sinhala Subtitle Engine: Fonts ready & verified.")
 
 
-def make_transfer_cb(msg, st, icon, title):
-    t0 = time.time()
-    last = [0.0]
-
-    async def cb(current, total):
-        if st.get("cancel"):
-            raise StopTransmission
-        now = time.time()
-        if current < total and now - last[0] < 3:
-            return
-        last[0] = now
-        el = max(now - t0, 0.001)
-        speed = current / el
-        eta = (total - current) / speed if speed > 0 else 0
-        pct = current * 100 / total if total else 0
-        await safe_edit(msg, render(icon, title, pct, [
-            f"📦 <b>{hsize(current)}</b> / {hsize(total)}",
-            f"🚀 වේගය: <b>{hsize(speed)}/s</b>",
-            f"⏳ ඉතිරි වෙලාව: <b>{htime(eta)}</b>   ⏱ ගතවුනේ: {htime(el)}",
-        ]))
-    return cb
-
-
-# ----------------------------------------------------------------------------
-#  4) ASS PREPARATION  (encoding fix + missing font → Noto Sans Sinhala)
-# ----------------------------------------------------------------------------
 def installed_families():
-    out = sh("fc-list : family").stdout
     fams = set()
-    for line in out.splitlines():
-        for f in line.split(","):
-            f = f.strip().lower()
-            if f:
-                fams.add(f)
+    try:
+        out = subprocess.run("fc-list : family", shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout
+        for line in out.splitlines():
+            for f in line.split(","):
+                f = f.strip().lower()
+                if f:
+                    fams.add(f)
+    except Exception:
+        pass
     return fams
 
 
 # සිංහල "පිල්ලම්" (Dependent vowel signs, Virama, ZWJ ...) — Karaoke Tag එකකින් වෙන් වුනොත්
 # libass වලට Shape කරන්න බැරි වෙලා තනි ◌ ලකුණක් විදිහට පෙන්නනවා. ඒවා කලින් Syllable එකටම ඈඳනවා.
-SI_MARKS = set("ංඃ්") | {chr(c) for c in range(0x0dcf, 0x0de0)} | {"ෲ", "ෳ"}
+SI_MARKS = set("ංඃ්‍‌") | {chr(c) for c in range(0x0dcf, 0x0de0)} | {"ෲ", "ෳ"}
 ZWJ = "‍"
 HAS_SINHALA = re.compile("[඀-෿]")
+
+
+def normalize_sinhala_text(t):
+    """Normalize broken Sinhala sequences (split vowels, lone base + sign, etc.)
+    Fixes 'ඔ්නෙ' -> 'ඕනෙ', 'ක්ලෝවර්' -> 'ක්ලෝවර්', 'පලිඟුමේ' -> 'පලිඟුමේ'."""
+    if not t:
+        return t
+    # 1. Standalone vowel letters typed as base + sign
+    t = re.sub(r'\u0d94\u0dca', '\u0d95', t)  # ඔ + ් -> ඕ
+    t = re.sub(r'\u0d85\u0dcf', '\u0d86', t)  # අ + ා -> ආ
+    t = re.sub(r'\u0d85\u0dd0', '\u0d87', t)  # අ + ැ -> ඇ
+    t = re.sub(r'\u0d85\u0dd1', '\u0d88', t)  # අ + ෑ -> ඈ
+    t = re.sub(r'\u0d8b\u0ddf', '\u0d8c', t)  # උ + ෟ -> ඌ
+    t = re.sub(r'\u0d91\u0dca', '\u0d92', t)  # එ + ් -> ඒ
+    t = re.sub(r'\u0d91\u0dd9', '\u0d93', t)  # එ + ෙ -> ඓ
+
+    # 2. Split vowel signs
+    t = re.sub(r'\u0dd9\u0dcf\u0dca', '\u0ddd', t)  # ෙ + ා + ් -> ෝ
+    t = re.sub(r'\u0dd9\u0dcf', '\u0ddc', t)        # ෙ + ා -> ො
+    t = re.sub(r'\u0ddc\u0dca', '\u0ddd', t)        # ො + ් -> ෝ
+    t = re.sub(r'\u0dda\u0dcf', '\u0ddd', t)        # ේ + ා -> ෝ
+    t = re.sub(r'\u0dd9\u0dca', '\u0dda', t)        # ෙ + ් -> ේ
+    t = re.sub(r'\u0dd9\u0dd9', '\u0ddb', t)        # ෙ + ෙ -> ෛ
+    t = re.sub(r'\u0dd9\u0ddf', '\u0dde', t)        # ෙ + ෟ -> ෞ
+    return t
 
 
 def merge_sinhala_marks(text):
@@ -411,7 +1052,8 @@ def prep_ass(src, dst, emb=None):
             if HAS_SINHALA.search(parts[text_idx]):
                 st_idx = ev_cols.index("style") if "style" in ev_cols else 3
                 si_styles.add(parts[st_idx].strip().lstrip("*").lower())
-                new = merge_sinhala_marks(parts[text_idx])
+                merged_line = merge_sinhala_marks(parts[text_idx])
+                new = normalize_sinhala_text(merged_line)
                 if new != parts[text_idx]:
                     merged += 1
                     parts[text_idx] = new
@@ -489,190 +1131,6 @@ def prep_ass(src, dst, emb=None):
     return sorted(replaced), merged, sorted(used_emb)
 
 
-# ----------------------------------------------------------------------------
-#  5) FFMPEG
-# ----------------------------------------------------------------------------
-async def probe(path):
-    p = await asyncio.create_subprocess_exec(
-        "ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-    out, _ = await p.communicate()
-    j = json.loads(out or b"{}")
-    if not any(x.get("codec_type") == "video" for x in j.get("streams", [])):
-        raise RuntimeError("වීඩියෝ ගොනුව කියවන්න බැරි වුනා (Download එක අසම්පූර්ණ/කැඩිලා වෙන්න පුළුවන්). ආයෙ එවන්න.")
-    v = next(s for s in j["streams"] if s["codec_type"] == "video")
-    dur = float(j["format"].get("duration") or v.get("duration") or 0)
-
-    def sbps(s):
-        for val in (s.get("bit_rate"), (s.get("tags") or {}).get("BPS")):
-            try:
-                return float(val)
-            except (TypeError, ValueError):
-                pass
-        return 0.0
-
-    audios = [s for s in j["streams"] if s["codec_type"] == "audio"]
-    a_bps = sum(sbps(a) or 128_000 for a in audios)
-    total = (os.path.getsize(path) * 8 / dur) if dur else float(j["format"].get("bit_rate") or 0)
-    a_bps = min(a_bps, total * 0.5)
-    real_v = max(total - a_bps, total * 0.3)       # ගොනුවේ සැබෑ Size එකෙන් ගණන් බැලූ Video Bitrate
-    v_bps = min(sbps(v) or real_v, real_v * 1.15)  # Tags වල බොරු ලොකු අගයන් පිළිගන්නෙ නෑ
-    v_bps = v_bps or 1_500_000
-    return {"dur": dur, "w": int(v["width"]), "h": int(v["height"]),
-            "vcodec": v.get("codec_name", ""), "v_bps": v_bps,
-            "acodecs": [a.get("codec_name", "") for a in audios]}
-
-
-def target_bitrate(info, out_codec):
-    """Source Bitrate එකට ආසන්න (Size එක Original එක තරම් තියාගන්න) Bitrate එකක්."""
-    efficient = info["vcodec"] in ("hevc", "av1", "vp9")
-    if out_codec == "hevc":
-        f = QUALITY_BOOST if efficient else 0.9
-    else:
-        f = QUALITY_BOOST * 1.5 if efficient else 1.3
-    return min(max(info["v_bps"] * f, 350_000), 30_000_000)
-
-
-async def encode(st, status, video, workdir, duration, venc, aenc, label):
-    vf = "ass=sub.ass:fontsdir=vfonts:shaping=complex,format=yuv420p"   # vfonts = වීඩියෝවේ Fonts + User Fonts
-    if st["fmt"] == "mkv":
-        venc = [x for i, x in enumerate(venc) if x != "-tag:v" and not (i and venc[i - 1] == "-tag:v")]
-        maps = ["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?",
-                "-map_chapters", "0", "-map_metadata", "0", "-c:s", "copy", "-c:t", "copy"]
-        tail = []
-    else:
-        maps = ["-map", "0:v:0", "-map", "0:a?", "-sn", "-dn", "-map_chapters", "-1"]
-        tail = ["-movflags", "+faststart"]
-    cmd = ["ffmpeg", "-hide_banner", "-y", "-i", video, *maps,
-           "-vf", vf, *venc, *aenc, *tail,
-           "-progress", "pipe:1", "-nostats", "output." + st["fmt"]]
-    logf = open(os.path.join(workdir, "ffmpeg.log"), "wb")
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, cwd=workdir, stdout=asyncio.subprocess.PIPE, stderr=logf)
-    st["proc"] = proc
-    t0, last = time.time(), 0.0
-    cur = {"t": 0.0, "fps": "0", "speed": "0x"}
-    while True:
-        line = await proc.stdout.readline()
-        if not line:
-            break
-        k, _, v = line.decode(errors="ignore").strip().partition("=")
-        if k in ("out_time_us", "out_time_ms"):
-            try:
-                cur["t"] = int(v) / 1_000_000
-            except ValueError:
-                pass
-        elif k == "fps":
-            cur["fps"] = v
-        elif k == "speed":
-            cur["speed"] = v
-        elif k == "progress":
-            now = time.time()
-            if v == "continue" and now - last < 3:
-                continue
-            last = now
-            pct = cur["t"] * 100 / duration if duration else 0
-            try:
-                sp = float(cur["speed"].replace("x", "").strip() or 0)
-            except ValueError:
-                sp = 0
-            eta = (duration - cur["t"]) / sp if sp > 0 else 0
-            await safe_edit(status, render("🔥", "Subtitle Burn වෙමින් පවතී", pct, [
-                f"🎞 වීඩියෝ කාලය: <b>{htime(cur['t'])}</b> / {htime(duration)}",
-                f"⚡ වේගය: <b>{cur['speed']}</b>   🖼 FPS: {cur['fps']}",
-                f"⏳ ඉතිරි වෙලාව: <b>{htime(eta)}</b>   ⏱ ගතවුනේ: {htime(now - t0)}",
-                f"🧠 Encoder: <code>{label}</code>",
-            ]))
-    rc = await proc.wait()
-    logf.close()
-    st["proc"] = None
-    if st.get("cancel"):
-        raise Cancelled
-    return rc == 0
-
-
-async def make_thumb(video, workdir, duration):
-    thumb = os.path.join(workdir, "thumb.jpg")
-    p = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(min(5, duration / 2)),
-        "-i", video, "-frames:v", "1", "-vf", "scale=320:-1", thumb,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-    await p.wait()
-    return thumb if os.path.exists(thumb) else None
-
-
-# ----------------------------------------------------------------------------
-#  5b) FAST PARALLEL DOWNLOAD  (වීඩියෝව කොටස් 8 කට කඩලා එකවර Download කරනවා)
-# ----------------------------------------------------------------------------
-DL_PARTS = 8
-CHUNK = 1024 * 1024
-
-
-async def fast_download(client, message, path, progress):
-    media = message.video or message.document or message.animation
-    size = media.file_size or 0
-    if size < 8 * CHUNK:
-        return await message.download(file_name=path, progress=progress)
-    fid = FileId.decode(media.file_id)
-    n_chunks = math.ceil(size / CHUNK)
-    parts = min(DL_PARTS, n_chunks)
-    per = math.ceil(n_chunks / parts)
-    lock = threading.Lock()
-    done = [0]
-    with open(path, "wb") as f:
-        f.truncate(size)
-    fh = open(path, "r+b")
-
-    def write(off, data):
-        with lock:
-            fh.seek(off)
-            fh.write(data)
-
-    start_lock = asyncio.Lock()   # Auth Export/Import එකිනෙකට පැටලෙන්න දෙන්නෙ නෑ (AUTH_BYTES_INVALID)
-
-    async def seg(i):
-        start = i * per
-        cnt = min(per, n_chunks - start)
-        if cnt <= 0:
-            return
-        off = begin = start * CHUNK
-        agen = client.get_file(fid, size, limit=cnt, offset=start).__aiter__()
-
-        async def put(chunk):
-            nonlocal off
-            await asyncio.to_thread(write, off, chunk)
-            off += len(chunk)
-            done[0] += len(chunk)
-            await progress(min(done[0], size), size)
-
-        async with start_lock:           # Session එක පිහිටුවා පළමු කොටස එනකම් එකින් එක
-            try:
-                first = await agen.__anext__()
-            except StopAsyncIteration:
-                first = None
-        if first is not None:
-            await put(first)
-            async for chunk in agen:
-                await put(chunk)
-        # get_file Error නිහඬව නවත්තනවා — අඩුවෙන් ආවොත් Fail කරනවා (නැත්නම් Zero-filled ගොනුවක් හැදෙනවා)
-        if off - begin < min(cnt * CHUNK, size - begin):
-            raise RuntimeError(f"කොටස {i} සම්පූර්ණ වුනේ නෑ")
-
-    tasks = [asyncio.ensure_future(seg(i)) for i in range(parts)]
-    try:
-        await asyncio.gather(*tasks)
-    except BaseException:
-        for t in tasks:
-            t.cancel()
-        fh.close()
-        raise
-    fh.close()
-    return path if os.path.getsize(path) == size else None
-
-
-# ----------------------------------------------------------------------------
-#  5c) SRT -> ASS
-# ----------------------------------------------------------------------------
 def srt_to_ass(src, dst, w, h):
     text = read_text_file(src).replace("\r\n", "\n").replace("\r", "\n")
     tc = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)")
@@ -727,306 +1185,1327 @@ def srt_to_ass(src, dst, w, h):
     return len(events)
 
 
-# ----------------------------------------------------------------------------
-#  6) BOT
-# ----------------------------------------------------------------------------
-app = Client("ass_burner_bot", api_id=int(API_ID), api_hash=API_HASH, bot_token=BOT_TOKEN,
-             in_memory=True, parse_mode=ParseMode.HTML, sleep_threshold=60,
-             max_concurrent_transmissions=16)
-
-HELP = (
-    "👋 <b>Sinhala ASS Karaoke Burner Bot</b>\n\n"
-    "1️⃣ මට <b>වීඩියෝ එක</b> එවන්න\n"
-    "2️⃣ ඊට පස්සෙ <b>.ass / .srt Subtitle ගොනුව</b> එවන්න\n"
-    "3️⃣ මම T4 GPU එකෙන් Subtitle එක වීඩියෝවට Burn කරලා ආපහු එවනවා 🚀\n\n"
-    "🔤 විශේෂ Font එකක් ඕන නම් <b>.ttf / .otf</b> ගොනුව ඒ විදිහටම එවන්න.\n"
-    "⚙️ Upload Mode (Streaming / Document) තෝරන්න: /mod\n"
-    "❌ නවත්තන්න: /cancel"
-)
-
-
-def new_state(uid, chat):
-    d = os.path.join(WORK_ROOT, str(uid))
-    shutil.rmtree(d, ignore_errors=True)
-    os.makedirs(d, exist_ok=True)
-    return {"dir": d, "chat": chat, "video": None, "ass": None, "vname": "video",
-            "busy": False, "dl": False, "cancel": False, "proc": None}
-
-
-def get_state(uid, chat):
-    if uid not in S:
-        S[uid] = new_state(uid, chat)
-    S[uid]["chat"] = chat
-    return S[uid]
-
-
-def try_start(uid):
-    st = S.get(uid)
-    if st and st["video"] and st["ass"] and not st["busy"] and not st["dl"]:
-        st["busy"] = True
-        asyncio.get_event_loop().create_task(process(uid))
-
-
-@app.on_message(filters.command(["start", "help"]) & filters.private)
-async def cmd_start(c, m):
-    await m.reply_text(HELP)
-
-
-@app.on_message(filters.command("cancel") & filters.private)
-async def cmd_cancel(c, m):
-    st = S.get(m.from_user.id)
-    if not st:
-        return await m.reply_text("ℹ️ Cancel කරන්න දෙයක් නෑ.")
-    st["cancel"] = True
-    p = st.get("proc")
-    if p and p.returncode is None:
-        try:
-            p.kill()
-        except Exception:
-            pass
-    if not st["busy"] and not st["dl"]:
-        shutil.rmtree(st["dir"], ignore_errors=True)
-        S.pop(m.from_user.id, None)
-    await m.reply_text("🛑 Cancel කරා.")
-
-
-def mod_view(uid):
-    cur = MODES.get(uid, DEFAULT_MODE)
-    text = (
-        "⚙️ <b>Upload Mode තෝරන්න</b>\n\n"
-        "🎬 <b>Streaming</b> — MP4. Telegram එකේම කෙලින් Play/Seek වෙනවා. "
-        "සියලුම Audio Tracks ඉතුරු වෙනවා, නමුත් Soft Subtitles/Fonts ඉතුරු වෙන්නෙ නෑ.\n\n"
-        "📁 <b>Document</b> — MKV ගොනුවක් විදිහට. Audio Tracks, Soft Subtitles, Fonts, Chapters "
-        "ඔක්කොම ආරක්ෂා වෙනවා. Download කරලා Play කරන්න ඕන.\n\n"
-        f"දැනට තෝරලා තියෙන්නෙ: <b>{'🎬 Streaming' if cur == 'stream' else '📁 Document'}</b>")
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(("✅ " if cur == "stream" else "") + "🎬 Streaming", callback_data="mod_stream"),
-        InlineKeyboardButton(("✅ " if cur == "doc" else "") + "📁 Document", callback_data="mod_doc"),
-    ]])
-    return text, kb
-
-
-@app.on_message(filters.command("mod") & filters.private)
-async def cmd_mod(c, m):
-    text, kb = mod_view(m.from_user.id)
-    await m.reply_text(text, reply_markup=kb)
-
-
-@app.on_callback_query(filters.regex(r"^mod_(stream|doc)$"))
-async def cb_mod(c, q):
-    new = q.data.split("_", 1)[1]
-    if MODES.get(q.from_user.id, DEFAULT_MODE) == new:
-        return await q.answer("දැනටමත් මේ Mode එකයි ✅")
-    MODES[q.from_user.id] = new
-    text, kb = mod_view(q.from_user.id)
+def extract_embedded_fonts(video, dest):
+    """වීඩියෝව (MKV) ඇතුළේ Attachment විදිහට තියෙන Fonts dest එකට Extract කරලා,
+    ඒවායේ Family නම් -> {'si': සිංහල Glyphs තියෙනවද, 'latin': English Glyphs තියෙනවද} Dict එකක් දෙනවා."""
+    os.makedirs(dest, exist_ok=True)
     try:
-        await q.message.edit_text(text, reply_markup=kb)
-    except Exception:
-        pass
-    await q.answer("🎬 Streaming Mode" if new == "stream" else "📁 Document Mode")
+        r = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", video],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+        streams = json.loads(r.stdout or b"{}").get("streams", [])
+        atts = [s for s in streams if s.get("codec_type") == "attachment"]
+        if not atts:
+            return {}
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+        for n in range(len(atts)):
+            cmd += [f"-dump_attachment:t:{n}", os.path.join(dest, f"emb_{n}.bin")]
+        cmd += ["-i", video, "-t", "0", "-f", "null", "-"]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+    except Exception as e:
+        logger.warning(f"Embedded Fonts Extract error: {e}")
+        return {}
 
-
-@app.on_message(filters.command("gpu") & filters.private)
-async def cmd_gpu(c, m):
-    r = sh("nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader")
-    enc = GPU_ENC[0] if GPU_ENC else "libx264 (CPU)"
-    await m.reply_text(f"🖥 <code>{html.escape(r.stdout.strip() or 'GPU නෑ')}</code>\n🎞 Encoder: <b>{enc}</b>")
-
-
-@app.on_message(filters.private & (filters.video | filters.document | filters.animation))
-async def on_file(c, m):
-    uid = m.from_user.id
-    doc = m.document
-    name = (doc.file_name if doc and doc.file_name else "").lower()
-    ext = os.path.splitext(name)[1]
-
-    if doc and ext in SUB_EXT:
-        kind = "sub"
-    elif doc and ext in FONT_EXT:
-        kind = "font"
-    elif m.video or m.animation or (doc and (ext in VIDEO_EXT or (doc.mime_type or "").startswith("video/"))):
-        kind = "video"
-    else:
-        return await m.reply_text("⚠️ වීඩියෝ එකක්, .ass/.srt ගොනුවක් හෝ Font (.ttf/.otf) එකක් විතරක් එවන්න.")
-
-    st = get_state(uid, m.chat.id)
-    if st["busy"]:
-        return await m.reply_text("⏳ දැනට වැඩක් කරමින් ඉන්නවා. /cancel කරන්න හෝ ඉවර වෙනකම් ඉන්න.")
-
-    # ---------- FONT ----------
-    if kind == "font":
-        os.makedirs(FONT_DIR, exist_ok=True)
-        fpath = os.path.join(FONT_DIR, os.path.basename(doc.file_name))
-        await m.download(file_name=fpath)
-        await asyncio.to_thread(patch_font, fpath)
-        await asyncio.to_thread(sh, "fc-cache -f")
-        return await m.reply_text(f"🔤 Font එක Install කරා: <code>{html.escape(doc.file_name)}</code>")
-
-    # ---------- SUBTITLE ----------
-    if kind == "sub":
-        path = os.path.join(st["dir"], "input" + ext)
-        await m.download(file_name=path)
-        st["ass"] = path
-        if st["video"]:
-            await m.reply_text("✅ Subtitle ලැබුනා! Burn කිරීම පටන් ගන්නවා... 🔥")
-            return try_start(uid)
-        msg = "✅ Subtitle ලැබුනා!"
-        if st["dl"]:
-            msg += " වීඩියෝ එක Download වෙලා ඉවර වුනාම ස්වයංක්‍රීයව පටන් ගන්නවා."
-        else:
-            msg += " දැන් <b>වීඩියෝ එක</b> එවන්න 🎬"
-        return await m.reply_text(msg)
-
-    # ---------- VIDEO ----------
-    if st["dl"]:
-        return await m.reply_text("⏳ වීඩියෝ එකක් Download වෙමින් පවතී.")
-    fname = (doc.file_name if doc and doc.file_name else
-             (m.video.file_name if m.video and m.video.file_name else "video.mp4"))
-    st["vname"] = os.path.splitext(os.path.basename(fname))[0] or "video"
-    st["cancel"], st["dl"] = False, True
-    status = await m.reply_text("📥 Download පටන් ගන්නවා...")
-    try:
-        vpath = os.path.join(st["dir"], "input" + (os.path.splitext(fname)[1] or ".mp4"))
-        cb = make_transfer_cb(status, st, "📥", "වීඩියෝ එක Download වෙමින් පවතී")
+    from fontTools.ttLib import TTFont, TTCollection
+    fams = {}
+    for fn in sorted(os.listdir(dest)):
+        if not fn.startswith("emb_") or not fn.endswith(".bin"):
+            continue
+        p = os.path.join(dest, fn)
         try:
-            res = await fast_download(app, m, vpath, cb)
-        except StopTransmission:
-            res = None
+            with open(p, "rb") as fh:
+                magic = fh.read(4)
+            ext = {b"OTTO": ".otf", b"ttcf": ".ttc", b"\x00\x01\x00\x00": ".ttf", b"true": ".ttf"}.get(magic)
+            if not ext or os.path.getsize(p) > 30 * 1024 * 1024:
+                os.remove(p)
+                continue
+            np_ = p[:-4] + ext
+            os.replace(p, np_)
+            patch_font(np_)
+            obj = TTCollection(np_, lazy=True) if ext == ".ttc" else TTFont(np_, lazy=True)
+            for f in (obj.fonts if ext == ".ttc" else [obj]):
+                cm = f.getBestCmap() or {}
+                info = {"si": 0x0D9A in cm, "latin": 0x41 in cm and 0x61 in cm}
+                for rec in f["name"].names:
+                    if rec.nameID in (1, 4, 6, 16):
+                        try:
+                            nm = rec.toUnicode().strip().lower()
+                        except Exception:
+                            continue
+                        if nm:
+                            cur = fams.setdefault(nm, {"si": False, "latin": False})
+                            cur["si"] |= info["si"]
+                            cur["latin"] |= info["latin"]
         except Exception as e:
-            if st["cancel"]:
-                raise Cancelled
-            log(f"Fast download අසාර්ථකයි ({e}); සාමාන්‍ය Download එකට මාරු වෙනවා")
-            res = await m.download(file_name=vpath, progress=cb)
-        if not res or st["cancel"]:
-            raise Cancelled
-        st["video"] = res
-        size = os.path.getsize(res)
-        await safe_edit(status, f"✅ <b>Download සම්පූර්ණයි</b>  ({hsize(size)})")
-    except Cancelled:
-        S.pop(uid, None)
-        shutil.rmtree(os.path.join(WORK_ROOT, str(uid)), ignore_errors=True)
-        return await safe_edit(status, "🛑 Download එක Cancel කරා.")
-    except Exception as e:
-        S.pop(uid, None)
-        return await safe_edit(status, f"❌ Download අසාර්ථකයි:\n<code>{html.escape(str(e))}</code>")
-    finally:
-        if uid in S:
-            S[uid]["dl"] = False
+            logger.warning(f"Embedded Font කියවන්න බැරි වුනා ({fn}): {e}")
+    return fams
 
-    if st["ass"]:
-        await m.reply_text("✅ Subtitle කලින් ලැබිලා තියෙනවා. Burn කිරීම පටන් ගන්නවා... 🔥")
-        try_start(uid)
+
+# ----------------------------------------------------------------------------
+#  ENCODER & BITRATE HELPERS (Ported directly from bot.py)
+# ----------------------------------------------------------------------------
+QUALITY_BOOST = 1.3
+
+def _v(b):
+    return str(int(b))
+
+def _hevc_full(v, m, b):
+    return ["-c:v", "hevc_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr",
+            "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b),
+            "-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1", "-tag:v", "hvc1"]
+
+def _hevc_simple(v, m, b):
+    return ["-c:v", "hevc_nvenc", "-preset", "medium", "-rc", "vbr",
+            "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b), "-tag:v", "hvc1"]
+
+def _h264_nv(v, m, b):
+    return ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr",
+            "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b), "-profile:v", "high"]
+
+def _x264(v, m, b):
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-maxrate", _v(m), "-bufsize", _v(b)]
+
+GPU_ENCODERS = [("hevc_nvenc (T4 GPU)", "hevc", _hevc_full),
+                ("hevc_nvenc (T4 GPU)", "hevc", _hevc_simple),
+                ("h264_nvenc (T4 GPU)", "h264", _h264_nv)]
+CPU_ENCODER = ("libx264 (CPU)", "h264", _x264)
+
+_detected_gpu_enc = None
+_gpu_enc_checked = False
+
+def detect_gpu_encoder():
+    global _detected_gpu_enc, _gpu_enc_checked
+    if _gpu_enc_checked:
+        return _detected_gpu_enc
+    for enc in GPU_ENCODERS:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+               "color=c=black:s=640x360:d=0.5", "-pix_fmt", "yuv420p",
+               *enc[2](1_000_000, 1_600_000, 3_200_000), "-f", "null", "-"]
+        if subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0:
+            _detected_gpu_enc = enc
+            _gpu_enc_checked = True
+            return enc
+    _detected_gpu_enc = None
+    _gpu_enc_checked = True
+    return None
+
+async def probe_video_stats(path):
+    p = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out, _ = await p.communicate()
+    j = json.loads(out or b"{}")
+    v = next((s for s in j.get("streams", []) if s.get("codec_type") == "video"), None)
+    dur = float(j.get("format", {}).get("duration") or (v.get("duration") if v else 0) or 0)
+
+    def sbps(s):
+        for val in (s.get("bit_rate"), (s.get("tags") or {}).get("BPS")):
+            try: return float(val)
+            except (TypeError, ValueError): pass
+        return 0.0
+
+    audios = [s for s in j.get("streams", []) if s.get("codec_type") == "audio"]
+    a_bps = sum(sbps(a) or 128_000 for a in audios)
+    total = (os.path.getsize(path) * 8 / dur) if dur else float(j.get("format", {}).get("bit_rate") or 0)
+    a_bps = min(a_bps, total * 0.5)
+    real_v = max(total - a_bps, total * 0.3)
+    v_bps = min(sbps(v) or real_v, real_v * 1.15) if v else real_v
+    v_bps = v_bps or 1_500_000
+    vcodec = v.get("codec_name", "") if v else ""
+    return {"dur": dur, "w": int(v.get("width", 1280) if v else 1280), "h": int(v.get("height", 720) if v else 720),
+            "vcodec": vcodec, "v_bps": v_bps,
+            "acodecs": [a.get("codec_name", "") for a in audios]}
+
+def target_bitrate(info, out_codec):
+    efficient = info["vcodec"] in ("hevc", "av1", "vp9")
+    if out_codec == "hevc":
+        f = QUALITY_BOOST if efficient else 0.9
     else:
-        await m.reply_text("📄 දැන් <b>.ass / .srt Subtitle ගොනුව</b> එවන්න.")
+        f = QUALITY_BOOST * 1.5 if efficient else 1.3
+    return min(max(info["v_bps"] * f, 350_000), 30_000_000)
 
 
-async def process(uid):
-    st = S[uid]
-    chat, d = st["chat"], st["dir"]
-    st["fmt"] = MODE_FMT[MODES.get(uid, DEFAULT_MODE)]
-    status = await app.send_message(chat, "⏳ GPU Queue එකේ ඉන්නවා...")
-    try:
-        async with GPU_LOCK:
-            t_all = time.time()
-            await safe_edit(status, "🧩 ASS ගොනුව සකස් කරනවා (Encoding / Fonts)...")
-            info = await probe(st["video"])
-            duration, w, h = info["dur"], info["w"], info["h"]
-            sub_src = st["ass"]
-            if sub_src.lower().endswith(".srt"):
-                sub_src = os.path.join(d, "converted.ass")
-                n_ev = await asyncio.to_thread(srt_to_ass, st["ass"], sub_src, w, h)
-                if n_ev == 0:
-                    raise RuntimeError("SRT ගොනුවෙන් Subtitle Lines කිසිවක් කියවන්න බැරි වුනා.")
-            vfonts = os.path.join(d, "vfonts")
-            emb = await asyncio.to_thread(extract_embedded_fonts, st["video"], vfonts)
-            if os.path.isdir(FONT_DIR):
-                for fn in os.listdir(FONT_DIR):
-                    if fn.lower().endswith(FONT_EXT) and not os.path.exists(os.path.join(vfonts, fn)):
-                        shutil.copy2(os.path.join(FONT_DIR, fn), vfonts)
-            replaced, merged, used_emb = await asyncio.to_thread(
-                prep_ass, sub_src, os.path.join(d, "sub.ass"), emb)
-
-            copy_ok = all(a in ("aac", "mp3", "ac3", "eac3", "opus") for a in info["acodecs"])
-            if st["fmt"] == "mkv":
-                copy_ok = True   # MKV වලට ඕනෑම Audio Codec එකක් Copy කරන්න පුළුවන්
-            a_opts = ([["-c:a", "copy"]] if copy_ok else []) + [["-c:a", "aac", "-b:a", "160k"]]
-            encoders = (GPU_ENCODERS[GPU_ENCODERS.index(GPU_ENC):] if GPU_ENC else []) + [CPU_ENCODER]
-            attempts = []
-            for label, codec, build in encoders:
-                tb = target_bitrate(info, codec)
-                venc = build(tb, tb * 1.6, tb * 3.2)
-                for aenc in a_opts:
-                    attempts.append((venc, aenc, f"{label} @ {tb / 1000:.0f} kbps"))
-
-            ok, used, t_enc = False, "", time.time()
-            for venc, aenc, label in attempts:
-                t_enc = time.time()
-                if os.path.exists(os.path.join(d, "output." + st["fmt"])):
-                    os.remove(os.path.join(d, "output." + st["fmt"]))
-                ok = await encode(st, status, st["video"], d, duration, venc, aenc, label)
-                if ok:
-                    used = label
+async def extract_and_prep_subtitles(video_path, width, height, sub_path=None):
+    """Extract embedded subtitle or use provided sub, dump embedded fonts to vfonts, and run prep_ass."""
+    temp_dir = os.path.join(os.path.dirname(video_path), f"temp_sub_{int(time.time())}_{random.randint(100,999)}")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # 1. Setup vfonts directory inside temp_dir
+    vfonts = os.path.join(temp_dir, "vfonts")
+    os.makedirs(vfonts, exist_ok=True)
+    
+    # 2. Extract embedded fonts into vfonts (bot.py logic)
+    emb = await asyncio.to_thread(extract_embedded_fonts, video_path, vfonts)
+    
+    # 3. Copy system fonts from FONT_DIR (~/.fonts) into vfonts
+    if os.path.isdir(FONT_DIR):
+        for fn in os.listdir(FONT_DIR):
+            if fn.lower().endswith((".ttf", ".otf", ".ttc")) and not os.path.exists(os.path.join(vfonts, fn)):
+                try:
+                    shutil.copy2(os.path.join(FONT_DIR, fn), vfonts)
+                except Exception:
+                    pass
+    
+    # 4. Subtitle extraction
+    raw_sub = None
+    sub_ext = None
+    if sub_path and os.path.exists(sub_path):
+        sub_ext = os.path.splitext(sub_path)[1].lower()
+        raw_sub = os.path.join(temp_dir, "input" + sub_ext)
+        shutil.copy2(sub_path, raw_sub)
+    else:
+        info = await probe_media_streams(video_path)
+        sub_streams = [s for s in info.get("streams", []) if s.get("codec_type") == "subtitle"]
+        if not sub_streams:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return None, None, None
+            
+        chosen_stream = None
+        for s in sub_streams:
+            lang = (s.get("tags", {}).get("language") or "").lower()
+            title = (s.get("tags", {}).get("title") or "").lower()
+            if any(k in lang or k in title for k in ("sin", "si", "sinhala", "සිංහල")):
+                chosen_stream = s
+                break
+        if not chosen_stream:
+            for s in sub_streams:
+                if s.get("disposition", {}).get("default") == 1:
+                    chosen_stream = s
                     break
-            if not ok:
-                tail = open(os.path.join(d, "ffmpeg.log"), "rb").read()[-900:].decode(errors="ignore")
-                raise RuntimeError("FFmpeg අසාර්ථකයි:\n" + tail)
-            enc_time = time.time() - t_enc
+        if not chosen_stream:
+            chosen_stream = sub_streams[0]
+            
+        s_idx = chosen_stream.get("index")
+        codec = (chosen_stream.get("codec_name") or "").lower()
+        
+        if codec in ("ass", "ssa"):
+            raw_sub = os.path.join(temp_dir, "extracted.ass")
+            sub_ext = ".ass"
+        else:
+            raw_sub = os.path.join(temp_dir, "extracted.srt")
+            sub_ext = ".srt"
+            
+        cmd = ["ffmpeg", "-y", "-i", video_path, "-map", f"0:{s_idx}", raw_sub]
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await proc.communicate()
+        
+        if not os.path.exists(raw_sub) or os.path.getsize(raw_sub) == 0:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return None, None, None
 
-            final = os.path.join(d, re.sub(r'[\\/:*?"<>|]', "_", st["vname"]) + "_Sinhala." + st["fmt"])
-            os.replace(os.path.join(d, "output." + st["fmt"]), final)
-            thumb = await make_thumb(final, d, duration)
-            fsize = os.path.getsize(final)
-            if fsize > 2000 * 1024 * 1024:
-                raise RuntimeError(f"ගොනුව {hsize(fsize)} — Telegram Bot සීමාව (2GB) ඉක්මවනවා.")
+    ass_input = raw_sub
+    if sub_ext in (".srt", ".vtt", ".txt"):
+        converted_ass = os.path.join(temp_dir, "converted.ass")
+        srt_to_ass(raw_sub, converted_ass, width, height)
+        ass_input = converted_ass
 
-            await safe_edit(status, render("📤", "Upload පටන් ගන්නවා", 0, [f"📦 {hsize(fsize)}"]))
-            cap = (f"🎬 <b>{html.escape(st['vname'])}</b>\n"
-                   f"✨ Sinhala Karaoke Subtitles Burned\n"
-                   f"⚡ {used} • ⏱ {htime(enc_time)}")
-            up_cb = make_transfer_cb(status, st, "📤", "Upload වෙමින් පවතී")
-            if st["fmt"] == "mkv":
-                await app.send_document(chat, final, caption=cap, thumb=thumb, force_document=True,
-                                        progress=up_cb)
-            else:
-                await app.send_video(
-                    chat, final, caption=cap, duration=int(duration), width=w, height=h,
-                    thumb=thumb, supports_streaming=True, progress=up_cb)
-            if st.get("cancel"):
-                raise Cancelled
-            await status.delete()
-            in_size = os.path.getsize(st["video"])
-            note = (f"\n📉 Size: {hsize(in_size)} → <b>{hsize(fsize)}</b>"
-                    f"\n🔤 සිංහල පිල්ලම් Fix කරපු Karaoke Lines: {merged}")
-            if used_emb:
-                note += f"\n🔠 වීඩියෝව ඇතුළේ Fonts පාවිච්චි කරා: {html.escape(', '.join(used_emb[:6]))}"
-            if replaced:
-                shown = ", ".join(replaced[:6]) + (f" +{len(replaced) - 6} තවත්" if len(replaced) > 6 else "")
-                note += (f"\n\nℹ️ <i>Colab එකේ නැති Fonts ({html.escape(shown)}) Noto Sans වලට ආදේශ කරා. "
-                         "මේක Error එකක් නෙවෙයි. ඒ Fonts .ttf විදිහට එව්වොත් ඒවාම පාවිච්චි වෙනවා.</i>")
-            await app.send_message(
-                chat, f"✅ <b>සම්පූර්ණයි!</b>\n⏱ මුළු කාලය: {htime(time.time() - t_all)}{note}")
-    except Cancelled:
-        await safe_edit(status, "🛑 Cancel කරා.")
-    except Exception as e:
-        await safe_edit(status, f"❌ <b>දෝෂයක්:</b>\n<code>{html.escape(str(e)[-900:])}</code>")
+    prepped_ass = os.path.join(temp_dir, "sub.ass")
+    await asyncio.to_thread(prep_ass, ass_input, prepped_ass, emb)
+    
+    return prepped_ass, vfonts, temp_dir
+
+
+async def hardsub_video(input_path, output_path, total_duration, task_id, filename, hevc_10bit=False, external_sub_path=None, resolution=None, prepped_ass=None, vfonts_dir=None):
+    """Burn embedded or external subtitles into video (hard sub) using exact Colab ASS Burner bot engine."""
+    temp_sub_dir = None
+    if not prepped_ass or not vfonts_dir:
+        duration, width, height = await get_video_meta(input_path)
+        prepped_ass, vfonts_dir, temp_sub_dir = await extract_and_prep_subtitles(input_path, width, height, sub_path=external_sub_path)
+        if not prepped_ass or not os.path.exists(prepped_ass):
+            logger.error(f"No valid subtitle found for hardsub in {filename}")
+            raise RuntimeError("වීඩියෝවේ Subtitles හමුවූයේ නැත. (No subtitle tracks found to burn)")
+
+    workdir = os.path.dirname(prepped_ass)
+
+    try:
+        info = await probe_video_stats(input_path)
+        out_codec = "hevc" if hevc_10bit else "h264"
+        tb = target_bitrate(info, out_codec)
+
+        # Resolution scaling
+        scale = None
+        res_str = "Original"
+        if resolution in [2160, "2160", "4k", "4K"]:
+            scale = "scale=-2:'min(2160,ih)'"
+            res_str = "4K"
+        elif resolution in [1080, "1080"]:
+            scale = "scale=-2:'min(1080,ih)'"
+            res_str = "1080p"
+            tb = min(tb, 4_500_000)
+        elif resolution in [720, "720"]:
+            scale = "scale=-2:'min(720,ih)'"
+            res_str = "720p"
+            tb = min(tb, 2_200_000)
+        elif resolution in [480, "480"]:
+            scale = "scale=-2:'min(480,ih)'"
+            res_str = "480p"
+            tb = min(tb, 1_100_000)
+
+        pix_fmt_filter = "format=p010le" if hevc_10bit else "format=yuv420p"
+        if scale:
+            vf = f"ass=sub.ass:fontsdir=vfonts:shaping=complex,{scale},{pix_fmt_filter}"
+        else:
+            vf = f"ass=sub.ass:fontsdir=vfonts:shaping=complex,{pix_fmt_filter}"
+
+        # Audio options
+        copy_ok = all(a in ("aac", "mp3", "ac3", "eac3", "opus") for a in info.get("acodecs", []))
+        if output_path.lower().endswith(".mkv"):
+            copy_ok = True
+        a_opts = ([["-c:a", "copy"]] if copy_ok else []) + [["-c:a", "aac", "-b:a", "160k"]]
+
+        gpu_enc = detect_gpu_encoder()
+        attempts = []
+        if hevc_10bit:
+            if gpu_enc and gpu_enc[1] == "hevc":
+                attempts.append((gpu_enc[2](tb, tb * 1.6, tb * 3.2), f"🔥 Hard Sub HEVC 10b {res_str} (GPU)"))
+            attempts.append((["-c:v", "libx265", "-preset", "veryfast", "-crf", "24", "-maxrate", _v(tb * 1.6), "-bufsize", _v(tb * 3.2)], f"🔥 Hard Sub HEVC 10b {res_str} (CPU)"))
+        else:
+            if gpu_enc:
+                if gpu_enc[1] == "h264":
+                    attempts.append((gpu_enc[2](tb, tb * 1.6, tb * 3.2), f"🔥 Hard Sub {res_str} (GPU)"))
+                else:
+                    attempts.append((_h264_nv(tb, tb * 1.6, tb * 3.2), f"🔥 Hard Sub {res_str} (GPU)"))
+            attempts.append((["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-maxrate", _v(tb * 1.6), "-bufsize", _v(tb * 3.2)], f"🔥 Hard Sub {res_str} (CPU)"))
+
+        abs_input = os.path.abspath(input_path)
+        abs_output = os.path.abspath(output_path)
+
+        for vcodec, action in attempts:
+            for aenc in a_opts:
+                cmd = [
+                    "ffmpeg", "-hide_banner", "-y", "-i", abs_input,
+                    "-vf", vf, *vcodec, *aenc,
+                    "-map", "0:v:0", "-map", "0:a?", "-sn", "-map_chapters", "0",
+                    "-progress", "pipe:1", "-nostats", "-loglevel", "error", abs_output
+                ]
+                if os.path.exists(abs_output):
+                    try: os.remove(abs_output)
+                    except Exception: pass
+                success = await run_ffmpeg_operation(cmd, abs_input, abs_output, total_duration, task_id, action, filename, cwd=workdir)
+                if success and os.path.exists(abs_output) and os.path.getsize(abs_output) > 1000:
+                    return True
+                logger.warning(f"Hardsub attempt with {action} failed, trying next fallback...")
+        return False
     finally:
-        shutil.rmtree(d, ignore_errors=True)
-        S.pop(uid, None)
+        if temp_sub_dir and os.path.exists(temp_sub_dir):
+            shutil.rmtree(temp_sub_dir, ignore_errors=True)
 
+# --- UI MENUS ---
+def get_panel_markup(task_id):
+    def btn(text, data, style=enums.ButtonStyle.DEFAULT):
+        return InlineKeyboardButton(text, callback_data=data, style=style)
+
+    return InlineKeyboardMarkup([
+        [btn("480p", f"panel_480_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("720p", f"panel_720_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("1080p", f"panel_1080_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("4K (2160p)", f"panel_2160_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+        [btn("480p HEVC 10b", f"panel_480hevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("720p HEVC 10b", f"panel_720hevc_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+        [btn("1080p HEVC 10b", f"panel_1080hevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("4K HEVC 10b", f"panel_2160hevc_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+        [btn("🔥 Hard Sub", f"panel_hardsub_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("🔥 Hard Sub HEVC 10b", f"panel_hardsubhevc_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+        [btn("🔥 H Sub All", f"panel_hsuball_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("🔥 H Sub All HEVC 10b", f"panel_hsuballhevc_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+        [btn("✂️ Remove Sub", f"panel_removesub_{task_id}", style=enums.ButtonStyle.DEFAULT),
+         btn("📝 Add Sub", f"panel_addsub_{task_id}", style=enums.ButtonStyle.DEFAULT),
+         btn("🔍 Extract Sub", f"panel_extract_sub_{task_id}", style=enums.ButtonStyle.DEFAULT)],
+        [btn("🎵 Extract Audio", f"panel_extract_audio_{task_id}", style=enums.ButtonStyle.DEFAULT),
+         btn("✏️ Rename", f"panel_rename_{task_id}", style=enums.ButtonStyle.SUCCESS)],
+        [btn("🔄 Re-encode All", f"panel_reencode_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("🔄 Re-encode HEVC 10b", f"panel_reencodehevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("🚀 Upload Now", f"panel_upload_{task_id}", style=enums.ButtonStyle.SUCCESS)],
+        [btn("❌ Cancel", f"panel_cancel_{task_id}", style=enums.ButtonStyle.DANGER)]
+    ])
+
+# Sinhala Help Menu
+async def help_cmd(client, message):
+    text = (
+        "<b>📚 Super Encoder & Leech Bot Help Menu</b>\n\n"
+        "<b>📥 ටොරන්ට් භාගත කිරීම:</b>\n"
+        "<code>/leech &lt;magnet_link&gt;</code> - Torrent එකක් භාගත කර File list එක ලබා ගෙන අවශ්‍ය files තෝරාගැනීමට.\n\n"
+        "<b>🎨 Encoding Panel Commands:</b>\n"
+        "පහත Commands ඔයාට Panel එකේ බොත්තම් විදියට වගේම, කෙලින්ම <b>වීඩියෝ එකකට Reply කරලත්</b> පාවිච්චි කරන්න පුළුවන්.\n\n"
+        "<b>🎬 Video Resolutions:</b>\n"
+        "<code>/480</code> - 480p වලට Convert කිරීම.\n"
+        "<code>/720</code> - 720p වලට Convert කිරීම.\n"
+        "<code>/1080</code> - 1080p වලට Convert කිරීම.\n"
+        "<code>/2160</code> හෝ <code>/4k</code> - 4K (2160p) වලට Convert කිරීම.\n"
+        "<code>/480hevc</code>, <code>/720hevc</code>, <code>/1080hevc</code>, <code>/2160hevc</code> (හෝ <code>/4khevc</code>) - HEVC 10-bit වලින් Convert කිරීම.\n"
+        "<code>/reencode</code> - 480p, 720p, 1080p සහ Original එකත් එක්ක Files ලබා දීම.\n"
+        "<code>/reencodehevc</code> - HEVC 10-bit වලින් All Resolutions Convert කිරීම.\n\n"
+        "<b>🔥 Hard Sub:</b>\n"
+        "<code>/hardsub</code> - Video එකේ ඇතුලේ තියෙන Subtitles Burn කිරීම (Original Resolution).\n"
+        "<code>/hardsubhevc</code> - Video එකේ ඇතුලේ තියෙන Subtitles HEVC 10-bit වලින් Burn කිරීම (Original / 4K).\n"
+        "<code>/hsuball</code> - 480p, 720p, 1080p සහ Original එකටම Hard Sub Burn කර Telegram Streamable Video ලෙස ලබා දීම.\n"
+        "<code>/hsuballhevc</code> - HEVC 10-bit වලින් All Resolutions Hard Sub Burn කර ලබා දීම.\n\n"
+        "<b>✂️ Subtitles:</b>\n"
+        "<code>/removesub</code> - Soft subtitles අයින් කිරීම.\n"
+        "<code>/addsub</code> - Subtitle එකතු කිරීම (වීඩියෝ එකකට subtitle file එකක් reply කරන්න).\n"
+        "<code>/extract_sub</code> - Subtitle එක වෙනම ගලවාගැනීම.\n\n"
+        "<b>🎵 Audio:</b>\n"
+        "<code>/addaudio</code> - අලුත් Audio Track එකක් දැමීම.\n"
+        "<code>/extract_audio</code> - Audio එක වෙනම ගලවාගැනීම.\n"
+        "<code>/remaudio</code> - Audio Track එක අයින් කිරීම.\n\n"
+        "<b>🖼 Thumbnail:</b>\n"
+        "<code>/extract_thumb</code> - වීඩියෝ එකේ Thumbnail එක ගලවාගැනීම.\n\n"
+        "<b>🛑 Tasks නැවැත්වීම:</b>\n"
+        "<code>/cancel_&lt;task_id&gt;</code> - ඕනෑම ක්‍රියාවලියක් නතර කිරීමට."
+    )
+    await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+
+# --- PROCESS MEDIA PIPELINE (CONCURRENCY CONTROLLED) ---
+async def process_media_file(client, chat_id, filepath, action, custom_renames, file_index, task_id, sub_path=None, audio_path=None, thumb_path=None):
+    filename = os.path.basename(filepath)
+    is_hardsub = (action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"])
+    if file_index in custom_renames and not is_hardsub:
+        new_filename = custom_renames[file_index]
+        new_filepath = os.path.join(os.path.dirname(filepath), new_filename)
+        os.rename(filepath, new_filepath)
+        filepath = new_filepath
+        filename = new_filename
+    
+    # 1. Apply MKV Watermark
+    filepath = await apply_mkv_watermark(filepath)
+    duration, w, h = await get_video_meta(filepath)
+    
+    files_to_upload = []
+    
+    # Generate requested qualities based on action
+    if action in ["480", "720", "1080", "2160", "4k", "480hevc", "720hevc", "1080hevc", "2160hevc", "4khevc", "reencode", "reencodehevc"]:
+        is_hevc_enc = "hevc" in action
+        raw_res = action.replace("hevc", "")
+        if raw_res in ["4k", "4K"]:
+            raw_res = "2160"
+        res_list = [int(raw_res)] if raw_res != "reencode" else ([480, 720, 1080, 2160] if h >= 2160 else [480, 720, 1080])
+        if raw_res == "reencode": files_to_upload.append(filepath) # Keep original
+        
+        for res in res_list:
+            if cancel_flags.get(task_id): break
+            clean_base = generate_res_name(filename, res)
+            if is_hevc_enc:
+                if "HEVC10" in clean_base:
+                    out_file = f"{clean_base}.mkv"
+                elif "HEVC" in clean_base:
+                    out_file = f"{re.sub(r'\\bHEVC\\b', 'HEVC10', clean_base)}.mkv"
+                else:
+                    out_file = f"{clean_base} [HEVC10].mkv"
+            else:
+                out_file = f"{clean_base}.mkv"
+
+            out_path = os.path.join(os.path.dirname(filepath), out_file)
+            success = await encode_video(filepath, out_path, res, duration, task_id, out_file, hevc_10bit=is_hevc_enc)
+            if success:
+                out_path = await apply_mkv_watermark(out_path)
+                files_to_upload.append(out_path)
+    elif action == "removesub":
+        out_path = os.path.join(os.path.dirname(filepath), "nosub_" + filename)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-map", "0:v", "-map", "0:a?", "-c", "copy", out_path]
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "✂️ Removing Subs", filename)
+        if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "addsub" and sub_path:
+        out_path = os.path.join(os.path.dirname(filepath), "sub_" + filename)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-i", sub_path, "-c", "copy", "-c:s", "srt", "-metadata:s:s:0", f"title={WATERMARK}", out_path]
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "📝 Adding Subtitle", filename)
+        if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "extract_sub":
+        import json
+        proc = await asyncio.create_subprocess_exec("mkvmerge", "-J", filepath, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        stdout, _ = await proc.communicate()
+        sub_tracks = []
+        try:
+            info = json.loads(stdout)
+            for track in info.get("tracks", []):
+                if track.get("type") == "subtitles":
+                    codec = track.get("codec", "").lower()
+                    ext = ".srt" if "subrip" in codec else ".ass" if "substation" in codec else ".sup" if "pgs" in codec else ".vobsub" if "vobsub" in codec else ".srt"
+                    sub_tracks.append((track["id"], ext, track.get("properties", {}).get("language", "und")))
+        except Exception as e:
+            logger.error(f"Error parsing mkvmerge: {e}")
+            
+        if not sub_tracks:
+            await client.send_message(chat_id, f"⚠️ <b>No subtitles found</b> or file is not MKV: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
+        else:
+            base_name = os.path.splitext(filename)[0]
+            extract_args = []
+            extracted_files = []
+            for i, (tid, ext, lang) in enumerate(sub_tracks):
+                out_path = os.path.join(os.path.dirname(filepath), f"{base_name}_track{tid}_{lang}{ext}")
+                extract_args.extend([f"{tid}:{out_path}"])
+                extracted_files.append(out_path)
+                
+            cmd = ["mkvextract", "tracks", filepath] + extract_args
+            ex_proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await ex_proc.communicate()
+            
+            for out_path in extracted_files:
+                if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                    files_to_upload.append(out_path)
+                    
+            if not files_to_upload:
+                await client.send_message(chat_id, f"⚠️ <b>Failed to extract subtitles</b> from: <code>{filename}</code>", parse_mode=enums.ParseMode.HTML)
+    elif action == "addaudio" and audio_path:
+        out_path = os.path.join(os.path.dirname(filepath), "audio_" + filename)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-i", audio_path, "-c", "copy", "-map", "0:v", "-map", "0:a?", "-map", "1:a", "-map", "0:s?", out_path]
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "🎵 Adding Audio", filename)
+        if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "extract_audio":
+        out_path = os.path.join(os.path.dirname(filepath), os.path.splitext(filename)[0] + ".aac")
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-vn", "-map", "0:a:0", "-c:a", "copy", out_path]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await proc.communicate()
+        if os.path.exists(out_path): files_to_upload.append(out_path)
+    elif action == "remaudio":
+        out_path = os.path.join(os.path.dirname(filepath), "noaudio_" + filename)
+        cmd = ["ffmpeg", "-y", "-i", filepath, "-map", "0:v", "-map", "0:s?", "-c", "copy", out_path]
+        success = await run_ffmpeg_operation(cmd, filepath, out_path, duration, task_id, "🔇 Removing Audio", filename)
+        if success: files_to_upload.append(await apply_mkv_watermark(out_path))
+    elif action == "extract_thumb":
+        out_path = os.path.join(os.path.dirname(filepath), os.path.splitext(filename)[0] + ".jpg")
+        cmd = ["ffmpeg", "-y", "-ss", "00:00:02", "-i", filepath, "-vframes", "1", out_path]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await proc.communicate()
+        if os.path.exists(out_path): files_to_upload.append(out_path)
+    elif action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"]:
+        is_hevc = (action in ["hardsubhevc", "hsuballhevc"])
+        prepped_ass, vfonts_dir, temp_sub_dir = await extract_and_prep_subtitles(filepath, w, h, sub_path=sub_path)
+        if not prepped_ass or not os.path.exists(prepped_ass):
+            logger.error(f"No valid subtitle found for hardsub in {filename}")
+            with contextlib.suppress(Exception):
+                await client.send_message(
+                    chat_id,
+                    f"⚠️ <b>Hard Sub Failed:</b> Subtitle track එකක් හමුවූයේ නැත. (No subtitle tracks found)",
+                    parse_mode=enums.ParseMode.HTML
+                )
+            return
+
+        try:
+            if action in ["hsuball", "hsuballhevc"]:
+                res_list = [480, 720, 1080, "original"]
+            else:
+                res_list = ["original"]
+
+            custom_base = custom_renames.get(file_index) or custom_renames.get(1)
+
+            for res in res_list:
+                if cancel_flags.get(task_id): break
+
+                if custom_base:
+                    base_name, ext = os.path.splitext(custom_base)
+                    ext = ext or ".mkv"
+                    if is_hevc:
+                        if "HEVC10" not in base_name:
+                            if "HEVC" in base_name:
+                                base_name = re.sub(r'\bHEVC\b', 'HEVC10', base_name)
+                            else:
+                                base_name = f"{base_name} HEVC10"
+                    if res == "original":
+                        out_name = f"{base_name}{ext}"
+                    else:
+                        out_name = f"{base_name} [{res}p]{ext}"
+                else:
+                    base_name, _ = os.path.splitext(filename)
+                    tag = " HEVC10" if is_hevc else ""
+                    if res == "original":
+                        out_name = f"{base_name}{tag} [HSUB].mkv"
+                    else:
+                        out_name = f"{base_name}{tag} [HSUB] [{res}p].mkv"
+
+                out_path = os.path.join(os.path.dirname(filepath), out_name)
+                is_same_file = (os.path.abspath(out_path) == os.path.abspath(filepath))
+                enc_out_path = os.path.join(os.path.dirname(filepath), f"enc_tmp_{out_name}") if is_same_file else out_path
+                try:
+                    success = await hardsub_video(
+                        filepath, enc_out_path, duration, task_id, out_name,
+                        hevc_10bit=is_hevc, prepped_ass=prepped_ass, vfonts_dir=vfonts_dir, resolution=res
+                    )
+                    if success:
+                        if is_same_file:
+                            if os.path.exists(filepath):
+                                os.remove(filepath)
+                            os.rename(enc_out_path, out_path)
+                        out_path = await apply_mkv_watermark(out_path)
+                        files_to_upload.append(out_path)
+                except Exception as e:
+                    logger.error(f"Hardsub error for {out_name}: {e}")
+                    with contextlib.suppress(Exception):
+                        await client.send_message(chat_id, f"⚠️ <b>Hard Sub Error ({res}):</b> {safe_html(str(e))}", parse_mode=enums.ParseMode.HTML)
+        finally:
+            if temp_sub_dir and os.path.exists(temp_sub_dir):
+                shutil.rmtree(temp_sub_dir, ignore_errors=True)
+    else:
+        # Default upload (Upload Now)
+        files_to_upload.append(filepath)
+
+    # 2. Upload generated files (Streamable Video for Hard Sub, Document otherwise)
+    is_hardsub = (action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"])
+    for f_path in files_to_upload:
+        if cancel_flags.get(task_id): break
+        f_name = os.path.basename(f_path)
+        f_size = os.path.getsize(f_path)
+        
+        start_time = time.time()
+        status_label = "📤 Uploading Video (Streamable)" if is_hardsub else "📤 Uploading Document"
+        if task_id in ACTIVE_TASKS:
+            ACTIVE_TASKS[task_id].update({
+                "status": status_label,
+                "filename": f_name,
+                "current": 0,
+                "total": f_size,
+                "is_time": False,
+                "start_time": start_time,
+                "speed": 0,
+                "eta": 0
+            })
+            
+        async def upload_progress(current, total):
+            if cancel_flags.get(task_id):
+                raise asyncio.CancelledError("Upload cancelled")
+            now = time.time()
+            elapsed = max(now - start_time, 0.001)
+            speed = current / elapsed
+            eta = max(total - current, 0) / speed if speed > 0 else 0
+            if task_id in ACTIVE_TASKS:
+                ACTIVE_TASKS[task_id].update({
+                    "current": current,
+                    "total": total,
+                    "speed": speed,
+                    "eta": eta
+                })
+
+        try:
+            cur_thumb = thumb_path or (CUSTOM_THUMB_PATH if os.path.exists(CUSTOM_THUMB_PATH) else None)
+            if is_hardsub:
+                duration_v, w_v, h_v = await get_video_meta(f_path)
+                if not cur_thumb:
+                    cur_thumb = await get_thumbnail(f_path)
+                msg = await upload_with_retry(
+                    client, chat_id, f_path, f_name, cur_thumb,
+                    progress=upload_progress,
+                    as_video=True,
+                    width=w_v,
+                    height=h_v,
+                    duration=duration_v
+                )
+            else:
+                msg = await upload_with_retry(
+                    client, chat_id, f_path, f_name, cur_thumb,
+                    progress=upload_progress,
+                    as_video=False
+                )
+            
+            # Automatically copy to Database Channel (if not already uploaded there)
+            if str(chat_id).lower() != TARGET_CHANNEL.lower() and msg and not getattr(msg, "_already_in_target_channel", False):
+                try:
+                    await msg.copy(
+                        chat_id=TARGET_CHANNEL,
+                        caption=f"<code>{f_name}</code>",
+                        parse_mode=enums.ParseMode.HTML
+                    )
+                except Exception as e:
+                    logger.error(f"Error copying to channel {TARGET_CHANNEL}: {e}")
+                    if "CHAT_WRITE_FORBIDDEN" in str(e) or "CHANNEL_PRIVATE" in str(e):
+                        with contextlib.suppress(Exception):
+                            await client.send_message(
+                                chat_id,
+                                f"⚠️ <b>Database Warning:</b> Bot cannot post to <code>{TARGET_CHANNEL}</code>.\n"
+                                f"Please add the bot as an <b>Admin with 'Post Messages' permission</b> to the channel!",
+                                parse_mode=enums.ParseMode.HTML
+                            )
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Upload error for {f_name}: {e}")
+            with contextlib.suppress(Exception):
+                await client.send_message(
+                    chat_id,
+                    f"❌ <b>Upload Failed:</b> <code>{safe_html(f_name)}</code>\n"
+                    f"Error: <code>{safe_html(str(e)[:200])}</code>\n"
+                    f"🔄 Try sending the file again.",
+                    parse_mode=enums.ParseMode.HTML
+                )
+
+# --- EXECUTE TASK WORKER WITH SEMAPHORE ---
+async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, is_telegram_file=False, sub_path=None, audio_path=None, custom_renames=None, thumb_path=None):
+    if custom_renames is None: custom_renames = {}
+    async with TASK_SEMAPHORE:
+        try:
+            cancel_flags[task_id] = False
+            await ensure_status_message(chat_id)
+
+            if is_telegram_file and media_msg:
+                dl_dir = f"/content/dl_{task_id}"
+                os.makedirs(dl_dir, exist_ok=True)
+                file_name = getattr(media_msg.document or media_msg.video, "file_name", "downloaded.mkv")
+                path = os.path.join(dl_dir, file_name)
+
+                ACTIVE_TASKS[task_id] = {
+                    "task_id": task_id,
+                    "chat_id": chat_id,
+                    "user_mention": getattr(media_msg.from_user, "mention", "User") if media_msg.from_user else "User",
+                    "filename": file_name,
+                    "status": "📥 Downloading TG File",
+                    "current": 0,
+                    "total": getattr(media_msg.document or media_msg.video, "file_size", 100),
+                    "is_time": False,
+                    "start_time": time.time(),
+                    "speed": 0,
+                    "eta": 0
+                }
+
+                # Download progress callback
+                def tg_progress(current, total):
+                    if cancel_flags.get(task_id): raise asyncio.CancelledError
+                    now = time.time()
+                    elapsed = max(now - ACTIVE_TASKS[task_id]["start_time"], 0.001)
+                    ACTIVE_TASKS[task_id]["current"] = current
+                    ACTIVE_TASKS[task_id]["total"] = total
+                    ACTIVE_TASKS[task_id]["speed"] = current / elapsed
+                    ACTIVE_TASKS[task_id]["eta"] = (total - current) / ACTIVE_TASKS[task_id]["speed"] if ACTIVE_TASKS[task_id]["speed"] > 0 else 0
+
+                try:
+                    path = await download_with_retry(
+                        client, media_msg, file_name=path,
+                        chat_id=chat_id, msg_id=int(task_id),
+                        progress=tg_progress
+                    )
+                except Exception as dl_err:
+                    logger.error(f"Download failed for task {task_id}: {dl_err}")
+                    with contextlib.suppress(Exception):
+                        await client.send_message(
+                            chat_id,
+                            f"❌ <b>Download Failed:</b> <code>{safe_html(file_name)}</code>\n"
+                            f"Error: <code>{safe_html(str(dl_err)[:200])}</code>\n\n"
+                            f"💡 <i>Possible reasons:</i>\n"
+                            f"• Telegram server timeout (large file)\n"
+                            f"• Colab network issue\n"
+                            f"• File too large for current session\n\n"
+                            f"🔄 <b>Try again or use a smaller file.</b>",
+                            parse_mode=enums.ParseMode.HTML
+                        )
+                    shutil.rmtree(dl_dir, ignore_errors=True)
+                    return
+                
+                if not path or not os.path.exists(path):
+                    logger.error(f"Downloaded file not found for task {task_id}")
+                    with contextlib.suppress(Exception):
+                        await client.send_message(
+                            chat_id,
+                            f"❌ <b>Download Error:</b> File <code>{safe_html(file_name)}</code> was not saved properly.\n"
+                            f"🔄 <b>Please try again.</b>",
+                            parse_mode=enums.ParseMode.HTML
+                        )
+                    shutil.rmtree(dl_dir, ignore_errors=True)
+                    return
+                
+                logger.info(f"File downloaded successfully: {path} ({format_bytes(os.path.getsize(path))})")
+                await process_media_file(client, chat_id, path, action, custom_renames, 1, task_id, sub_path, audio_path, thumb_path=thumb_path)
+                shutil.rmtree(dl_dir, ignore_errors=True)
+
+            elif not is_telegram_file and task_id in current_tasks:
+                t_data = current_tasks.pop(task_id)
+                if not custom_renames: custom_renames = t_data.get("custom_renames", {})
+                dl_dir = f"/content/dl_{task_id}"
+                os.makedirs(dl_dir, exist_ok=True)
+                global aria2_api
+                
+                if "url" in t_data:
+                    dl = aria2_api.add_uris([t_data["url"]], options={"dir": dl_dir})
+                    dl_type = "URL"
+                else:
+                    dl = aria2_api.add_torrent(t_data["torrent"], options={"dir": dl_dir, "select-file": ",".join(map(str, t_data["selected"]))})
+                    dl_type = "Torrent"
+                
+                ACTIVE_TASKS[task_id] = {
+                    "task_id": task_id,
+                    "chat_id": chat_id,
+                    "user_mention": t_data.get("user_mention", "User"),
+                    "filename": t_data["t_name"],
+                    "status": f"📥 Downloading {dl_type}",
+                    "current": 0,
+                    "total": 1,
+                    "is_time": False,
+                    "start_time": time.time(),
+                    "speed": 0,
+                    "eta": 0
+                }
+
+                while dl.status not in ["complete", "error", "removed"]:
+                    await asyncio.sleep(2)
+                    dl.update()
+                    if cancel_flags.get(task_id):
+                        aria2_api.remove([dl], force=True, files=False)
+                        break
+                    if dl.total_length > 0:
+                        ACTIVE_TASKS[task_id].update({
+                            "current": dl.completed_length,
+                            "total": dl.total_length,
+                            "speed": dl.download_speed,
+                            "eta": dl.eta.total_seconds() if dl.eta else 0
+                        })
+                        if dl.completed_length >= dl.total_length:
+                            aria2_api.remove([dl], force=True, files=False)
+                            break
+                        
+                if not cancel_flags.get(task_id):
+                    for f in dl.files:
+                        if (getattr(f, "selected", False) or "url" in t_data) and os.path.exists(str(f.path)):
+                            await process_media_file(client, chat_id, str(f.path), action, custom_renames, f.index, task_id, sub_path=sub_path, audio_path=audio_path, thumb_path=thumb_path)
+                shutil.rmtree(dl_dir, ignore_errors=True)
+
+        except asyncio.CancelledError:
+            logger.info(f"Task {task_id} was cancelled.")
+            with contextlib.suppress(Exception):
+                await client.send_message(chat_id, f"🛑 <b>Task cancelled.</b>", parse_mode=enums.ParseMode.HTML)
+        except Exception as e:
+            logger.error(f"Task {task_id} error: {e}")
+            with contextlib.suppress(Exception):
+                await client.send_message(
+                    chat_id,
+                    f"❌ <b>Task Error:</b>\n<code>{safe_html(str(e)[:300])}</code>\n\n🔄 <b>Please try again.</b>",
+                    parse_mode=enums.ParseMode.HTML
+                )
+        finally:
+            ACTIVE_TASKS.pop(task_id, None)
+            cancel_flags.pop(task_id, None)
+
+VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".flv", ".webm", ".ts", ".m4v", ".wmv", ".3gp"}
+
+# --- TELEGRAM FILE HANDLER (PANEL TRIGGER FOR GROUPS & PRIVATE) ---
+async def handle_telegram_file(client, message):
+    try:
+        # 1. If this message is a reply to ANY ongoing wizard or prompt, route to reply_handler immediately!
+        if message.reply_to_message:
+            return await reply_handler(client, message)
+
+        media = message.document or message.video
+        if not media: return
+        file_name = getattr(media, "file_name", "") or ""
+        ext = os.path.splitext(file_name)[1].lower()
+
+        # 2. If it's a subtitle file and there's a pending wizard waiting for subtitle in this chat:
+        if ext in [".ass", ".srt", ".vtt", ".sub"]:
+            for p_id, w_data in list(pending_hardsub_wizard.items()):
+                if w_data.get("chat_id") == message.chat.id and w_data.get("step") == "sub":
+                    try:
+                        message.reply_to_message = await client.get_messages(message.chat.id, int(p_id))
+                    except Exception:
+                        pass
+                    return await reply_handler(client, message)
+            # Standalone subtitle file with no active wizard: don't show video encoding panel!
+            return
+
+        # 3. Only trigger Video Encoding Panel for actual video files!
+        is_video = bool(message.video) or (ext in VIDEO_EXTS) or (getattr(media, "mime_type", "").startswith("video/"))
+        if not is_video:
+            return
+
+        if not file_name:
+            file_name = f"video_{message.id}.mp4"
+        task_id = str(message.id)
+        
+        await message.reply_text(
+            f"<b>🎬 File Detected:</b>\n<code>{safe_html(file_name)}</code>\n\n"
+            "👉 <i>Choose an action from the Encoding Panel below:</i>",
+            reply_markup=get_panel_markup(task_id),
+            parse_mode=enums.ParseMode.HTML,
+            quote=True
+        )
+    except Exception as e:
+        logger.error(f"Error in handle_telegram_file: {e}")
+
+# --- PANEL & ENCODE COMMAND HANDLER (GREAT FOR GROUPS) ---
+async def panel_cmd(client, message):
+    try:
+        media_msg = message.reply_to_message
+        if not media_msg or not (media_msg.document or media_msg.video):
+            if message.document or message.video:
+                media_msg = message
+            else:
+                return await message.reply("👉 <i>Please reply to a video or file with <code>/panel</code> to open the Encoding Panel.</i>", parse_mode=enums.ParseMode.HTML)
+        
+        media = media_msg.document or media_msg.video
+        file_name = getattr(media, "file_name", None)
+        if not file_name:
+            if media_msg.video: file_name = f"video_{media_msg.id}.mp4"
+            else: file_name = f"file_{media_msg.id}"
+            
+        task_id = str(media_msg.id)
+        await message.reply_text(
+            f"<b>🎬 File Detected:</b>\n<code>{safe_html(file_name)}</code>\n\n"
+            "👉 <i>Choose an action from the Encoding Panel below:</i>",
+            reply_markup=get_panel_markup(task_id),
+            parse_mode=enums.ParseMode.HTML,
+            quote=True
+        )
+    except Exception as e:
+        logger.error(f"Error in panel_cmd: {e}")
+
+# --- LEECH COMMAND ---
+async def handle_leech(client, message):
+    if len(message.command) < 2:
+        return await message.reply("Please provide a magnet link! Example: <code>/leech magnet:?...</code>", parse_mode=enums.ParseMode.HTML)
+    magnet = message.command[1]
+    
+    status_msg = await message.reply("🔍 <i>Fetching torrent metadata...</i>", parse_mode=enums.ParseMode.HTML)
+    temp_dir = f"/content/meta_{message.id}"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    try:
+        cmd = ["aria2c", "--bt-metadata-only=true", "--bt-save-metadata=true", "--console-log-level=error", "--dir", temp_dir, magnet]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await proc.communicate()
+        
+        t_file = next((os.path.join(temp_dir, n) for n in os.listdir(temp_dir) if n.endswith(".torrent")), None)
+        if not t_file: return await status_msg.edit_text("❌ Failed to fetch torrent metadata.")
+        
+        global aria2_api
+        
+        # Make a copy of the .torrent file for metadata extraction so it doesn't get deleted
+        t_file_meta = t_file + ".meta.torrent"
+        import shutil
+        shutil.copy(t_file, t_file_meta)
+        
+        meta_dl = aria2_api.add_torrent(t_file_meta, options={"pause": "true"})
+        files, t_name = meta_dl.files, meta_dl.name
+        aria2_api.remove([meta_dl], force=True, files=False)
+        
+        tree_html = build_file_tree(files, True)
+        tree_txt = build_file_tree(files, False)
+        
+        caption = (f"✅ <b>Torrent Identified!</b>\n\n"
+                   f"👉 <b>Reply to this message</b> with file numbers to download.\n"
+                   f"Example: <code>1,3,5-7</code> (or <code>all</code> for everything)")
+        
+        if len(tree_html) > 3500:
+            txt_path = os.path.join(temp_dir, "file_list.txt")
+            with open(txt_path, "w") as f: f.write(tree_txt)
+            prompt = await message.reply_document(document=txt_path, caption=caption, parse_mode=enums.ParseMode.HTML)
+        else:
+            prompt = await message.reply_text(f"<b>Files:</b>\n{tree_html}\n\n{caption}", parse_mode=enums.ParseMode.HTML)
+            
+        task_id = str(prompt.id)
+        current_tasks[task_id] = {
+            "torrent": t_file,
+            "files": files,
+            "t_name": t_name,
+            "temp": temp_dir,
+            "user_mention": message.from_user.mention if message.from_user else "User"
+        }
+        await status_msg.delete()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
+
+# --- URL COMMAND ---
+async def handle_url(client, message):
+    if len(message.command) < 2:
+        return await message.reply("Please provide a direct URL! Example: <code>/url https://domain.com/video.mkv</code>", parse_mode=enums.ParseMode.HTML)
+    url = message.command[1]
+    
+    file_name = url.split("/")[-1].split("?")[0]
+    if not file_name or len(file_name) < 3: file_name = "downloaded_video.mkv"
+    
+    task_id = str(message.id)
+    current_tasks[task_id] = {
+        "url": url,
+        "t_name": file_name,
+        "user_mention": message.from_user.mention if message.from_user else "User"
+    }
+    
+    await message.reply_text(
+        f"<b>🔗 URL Detected:</b>\n<code>{safe_html(url)}</code>\n\n"
+        "👉 <i>Choose an action from the Encoding Panel below:</i>",
+        reply_markup=get_panel_markup(task_id),
+        parse_mode=enums.ParseMode.HTML,
+        quote=True
+    )
+
+# --- THUMBNAIL HANDLER ---
+async def save_thumbnail(client, message):
+    if message.reply_to_message:
+        return await reply_handler(client, message)
+
+    # Check if there is an active Hard Sub wizard waiting for thumbnail in this chat:
+    for p_id, w_data in list(pending_hardsub_wizard.items()):
+        if w_data.get("chat_id") == message.chat.id and w_data.get("step") == "thumb":
+            try:
+                message.reply_to_message = await client.get_messages(message.chat.id, int(p_id))
+            except Exception:
+                pass
+            return await reply_handler(client, message)
+
+    if message.photo:
+        status = await message.reply("🖼️ <i>Downloading thumbnail...</i>", parse_mode=enums.ParseMode.HTML)
+        try:
+            await message.download(file_name=CUSTOM_THUMB_PATH)
+            await status.edit_text("✅ <b>Custom thumbnail saved successfully!</b>\nIt will be used for all future uploads.", parse_mode=enums.ParseMode.HTML)
+        except Exception as e:
+            await status.edit_text(f"❌ <b>Error saving thumbnail:</b>\n{e}", parse_mode=enums.ParseMode.HTML)
+
+# --- REPLY COMMANDS & FILE SELECTION ---
+async def reply_handler(client, message):
+    if not message.reply_to_message: return
+    r_id = str(message.reply_to_message.id)
+    raw_text = (message.text or message.caption or "").strip()
+    text = raw_text.lower()
+    # Check pending rename reply
+    if r_id in pending_renames:
+        r_data = pending_renames.pop(r_id)
+        new_name = raw_text
+        task_id = r_data["task_id"]
+        
+        if r_data["is_tg"]:
+            media_msg = r_data["media_msg"]
+            asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, "upload", media_msg=media_msg, is_telegram_file=True, custom_renames={1: new_name}))
+        else:
+            if task_id in current_tasks:
+                if "custom_renames" not in current_tasks[task_id]:
+                    current_tasks[task_id]["custom_renames"] = {}
+                sel = current_tasks[task_id]["selected"]
+                if len(sel) == 1:
+                    current_tasks[task_id]["custom_renames"][sel[0]] = new_name
+                await message.reply("✅ <b>File renamed!</b> Choose action from panel.", parse_mode=enums.ParseMode.HTML)
+        return
+
+    # Check pending subtitle reply
+    if r_id in pending_sub_replies and (message.document or message.video):
+        media_msg = pending_sub_replies.pop(r_id)
+        sub_dir = f"/content/sub_{message.id}"
+        os.makedirs(sub_dir, exist_ok=True)
+        sub_path = await client.download_media(message, file_name=sub_dir + "/")
+        task_id = str(message.id)
+        asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, "addsub", media_msg=media_msg, is_telegram_file=True, sub_path=sub_path))
+        return
+
+    # Check pending audio reply
+    if r_id in pending_audio_replies and (message.audio or message.document):
+        media_msg = pending_audio_replies.pop(r_id)
+        aud_dir = f"/content/aud_{message.id}"
+        os.makedirs(aud_dir, exist_ok=True)
+        aud_path = await client.download_media(message, file_name=aud_dir + "/")
+        task_id = str(message.id)
+        asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, "addaudio", media_msg=media_msg, is_telegram_file=True, audio_path=aud_path))
+        return
+
+    # Check pending hardsub wizard reply (3-step: Subtitle -> Thumbnail -> Rename)
+    if r_id in pending_hardsub_wizard:
+        w_data = pending_hardsub_wizard.pop(r_id)
+        step = w_data["step"]
+        is_skip = (text in ["/skip", "skip"])
+        act_title = "🔥 H Sub All HEVC 10b" if w_data["action"] == "hsuballhevc" else ("🔥 H Sub All" if w_data["action"] == "hsuball" else ("🔥 Hard Sub HEVC 10b" if w_data["action"] == "hardsubhevc" else "🔥 Hard Sub"))
+
+        if text.startswith("/cancel"):
+            return await message.reply(f"🛑 <b>{act_title} setup cancelled.</b>", parse_mode=enums.ParseMode.HTML)
+
+        if step == "sub":
+            if not is_skip and (message.document or message.video):
+                sub_dir = f"/content/hsub_{w_data['task_id']}"
+                os.makedirs(sub_dir, exist_ok=True)
+                w_data["sub_path"] = await client.download_media(message, file_name=sub_dir + "/")
+                sub_fname = getattr(message.document or message.video, "file_name", "subtitle")
+                sub_info = f"✅ <b>Subtitle Received:</b> <code>{safe_html(sub_fname)}</code>\n\n"
+            else:
+                w_data["sub_path"] = None
+                sub_info = "⏩ <b>Using Embedded Subtitles</b>\n\n"
+
+            prompt = await message.reply(
+                f"{sub_info}"
+                f"<b>{act_title} — Step 2/3: Thumbnail</b>\n\n"
+                "🖼️ <b>Please reply with a Thumbnail image (Photo) for this Hard Sub video</b>\n\n"
+                "👉 <i>Send <code>/skip</code> to use video thumbnail / default thumbnail.</i>",
+                parse_mode=enums.ParseMode.HTML
+            )
+            w_data["step"] = "thumb"
+            w_data["chat_id"] = message.chat.id
+            pending_hardsub_wizard[str(prompt.id)] = w_data
+            return
+
+        elif step == "thumb":
+            if not is_skip and (message.photo or (message.document and message.document.mime_type and message.document.mime_type.startswith("image/"))):
+                thumb_dir = f"/content/hthumb_{w_data['task_id']}"
+                os.makedirs(thumb_dir, exist_ok=True)
+                raw_thumb = await client.download_media(message, file_name=os.path.join(thumb_dir, "thumb.jpg"))
+                w_data["thumb_path"] = await fix_thumb_jpeg(raw_thumb)
+                thumb_info = "✅ <b>Custom Thumbnail Received!</b>\n\n"
+            else:
+                w_data["thumb_path"] = None
+                thumb_info = "⏩ <b>Using Default Thumbnail</b>\n\n"
+
+            note = "<i>(For 'H Sub All', the bot will automatically generate [480p], [720p], [1080p], and your exact name for Original without adding [Original]!)</i>\n\n" if w_data["action"] in ["hsuball", "hsuballhevc"] else ""
+            prompt = await message.reply(
+                f"{thumb_info}"
+                f"<b>{act_title} — Step 3/3: Output Name</b>\n\n"
+                "✏️ <b>Please reply with the Output File Name:</b>\n"
+                "Example: <code>[AK] [S02-E01] Black Clover HEVC [HSUB].mkv</code>\n\n"
+                f"{note}"
+                "👉 <i>Send <code>/skip</code> to keep original video filename.</i>",
+                parse_mode=enums.ParseMode.HTML
+            )
+            w_data["step"] = "rename"
+            w_data["chat_id"] = message.chat.id
+            pending_hardsub_wizard[str(prompt.id)] = w_data
+            return
+
+        elif step == "rename":
+            if not is_skip and raw_text:
+                w_data["custom_name"] = raw_text.strip()
+            else:
+                w_data["custom_name"] = None
+
+            await message.reply(
+                f"🚀 <b>{act_title} setup complete! Processing your video...</b>\n"
+                "<i>Videos will be uploaded as Telegram Streamable Videos!</i>",
+                parse_mode=enums.ParseMode.HTML
+            )
+            custom_renames = {1: w_data["custom_name"]} if w_data["custom_name"] else None
+            asyncio.create_task(
+                execute_task_worker(
+                    client, message.chat.id, w_data["task_id"], w_data["action"],
+                    media_msg=w_data["media_msg"], is_telegram_file=w_data["is_tg"],
+                    sub_path=w_data["sub_path"], thumb_path=w_data["thumb_path"],
+                    custom_renames=custom_renames
+                )
+            )
+            return
+
+    # 1. Torrent File Selection
+    if r_id in current_tasks:
+        task_data = current_tasks.pop(r_id)
+        selected = parse_selection(text, len(task_data["files"]))
+        if not selected: return await message.reply("❌ Invalid file selection. Please enter numbers like <code>1,2,3</code> or <code>all</code>.", parse_mode=enums.ParseMode.HTML)
+        
+        task_data["selected"] = selected
+        new_task_id = str(message.id)
+        current_tasks[new_task_id] = task_data
+        
+        await message.reply_text(
+            f"✅ <b>Files Selected!</b> Choose an action from the Encoding Panel:",
+            reply_markup=get_panel_markup(new_task_id),
+            parse_mode=enums.ParseMode.HTML,
+            quote=True
+        )
+        return
+        
+    # 2. Direct Reply Commands on Media (/480, /removesub, /extract_sub, etc.)
+    if message.reply_to_message.document or message.reply_to_message.video:
+        if text.startswith("/"):
+            action = text.replace("/", "").split()[0].replace(f"@{client.me.username}" if client.me else "", "")
+            
+            if action == "addsub":
+                prompt = await message.reply("📝 <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
+                pending_sub_replies[str(prompt.id)] = message.reply_to_message
+                return
+            elif action == "addaudio":
+                prompt = await message.reply("🎵 <b>Please reply to THIS message with your audio file (.aac, .m4a, .mp3, etc.)</b>", parse_mode=enums.ParseMode.HTML)
+                pending_audio_replies[str(prompt.id)] = message.reply_to_message
+                return
+            elif action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"]:
+                task_id = str(message.id)
+                act_title = "🔥 H Sub All HEVC 10b" if action == "hsuballhevc" else ("🔥 H Sub All" if action == "hsuball" else ("🔥 Hard Sub HEVC 10b" if action == "hardsubhevc" else "🔥 Hard Sub"))
+                prompt = await message.reply(
+                    f"<b>{act_title} — Step 1/3: Subtitle</b>\n\n"
+                    "📝 <b>Please reply to this message with your Subtitle file (.ass / .srt)</b>\n\n"
+                    "👉 <i>Send <code>/skip</code> if you want to use the embedded subtitles already inside the video.</i>",
+                    parse_mode=enums.ParseMode.HTML
+                )
+                pending_hardsub_wizard[str(prompt.id)] = {
+                    "step": "sub",
+                    "action": action,
+                    "task_id": task_id,
+                    "chat_id": message.chat.id,
+                    "media_msg": message.reply_to_message,
+                    "is_tg": True,
+                    "sub_path": None,
+                    "thumb_path": None,
+                    "custom_name": None
+                }
+                return
+            elif action in ["480", "720", "1080", "2160", "4k", "480hevc", "720hevc", "1080hevc", "2160hevc", "4khevc", "reencode", "reencodehevc", "removesub", "extract_sub", "extract_audio", "remaudio", "extract_thumb"]:
+                task_id = str(message.id)
+                asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, action, media_msg=message.reply_to_message, is_telegram_file=True))
+
+# --- PANEL CALLBACKS ---
+async def cb_handler(client, cb):
+    data = cb.data
+    if data.startswith("panel_"):
+        action = data[len("panel_"):].rsplit("_", 1)[0]
+        task_id = data.rsplit("_", 1)[1]
+        
+        if action == "cancel":
+            cancel_flags[task_id] = True
+            return await cb.message.edit_text("🚫 <b>Task cancelled.</b>", parse_mode=enums.ParseMode.HTML)
+        
+        # ALWAYS fetch the full original message to ensure media data is available
+        media_target = None
+        try:
+            media_target = await client.get_messages(cb.message.chat.id, int(task_id))
+            if media_target and not (media_target.document or media_target.video):
+                logger.warning(f"get_messages({task_id}): message found but no media, trying reply_to_message")
+                media_target = None
+        except Exception as e:
+            logger.warning(f"get_messages({task_id}) failed: {e}")
+        
+        # Fallback to reply_to_message
+        if not media_target:
+            media_target = cb.message.reply_to_message
+        
+        if action == "addsub":
+            await cb.message.edit_reply_markup(None)
+            prompt = await cb.message.reply("📝 <b>Please reply to THIS message with your subtitle file (.srt, .ass, etc.)</b>", parse_mode=enums.ParseMode.HTML)
+            pending_sub_replies[str(prompt.id)] = media_target
+            return
+
+        if action == "rename":
+            await cb.message.edit_reply_markup(None)
+            prompt = await cb.message.reply("✏️ <b>Please reply to THIS message with the NEW NAME (with extension, e.g. video.mkv):</b>", parse_mode=enums.ParseMode.HTML)
+            is_tg = (task_id not in current_tasks)
+            pending_renames[str(prompt.id)] = {"task_id": task_id, "is_tg": is_tg, "media_msg": media_target}
+            return
+
+        if action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"]:
+            await cb.message.edit_reply_markup(None)
+            act_title = "🔥 H Sub All HEVC 10b" if action == "hsuballhevc" else ("🔥 H Sub All" if action == "hsuball" else ("🔥 Hard Sub HEVC 10b" if action == "hardsubhevc" else "🔥 Hard Sub"))
+            prompt = await cb.message.reply(
+                f"<b>{act_title} — Step 1/3: Subtitle</b>\n\n"
+                "📝 <b>Please reply to this message with your Subtitle file (.ass / .srt)</b>\n\n"
+                "👉 <i>Send <code>/skip</code> if you want to use the embedded subtitles already inside the video.</i>",
+                parse_mode=enums.ParseMode.HTML
+            )
+            is_tg = (task_id not in current_tasks)
+            pending_hardsub_wizard[str(prompt.id)] = {
+                "step": "sub",
+                "action": action,
+                "task_id": task_id,
+                "chat_id": cb.message.chat.id,
+                "media_msg": media_target,
+                "is_tg": is_tg,
+                "sub_path": None,
+                "thumb_path": None,
+                "custom_name": None
+            }
+            return
+
+        await cb.message.edit_reply_markup(None)
+        is_tg = (task_id not in current_tasks)
+        
+        # Final validation: make sure we have a valid media message
+        if is_tg and (not media_target or not (media_target.document or media_target.video)):
+            logger.error(f"No valid media found for task {task_id}")
+            await cb.message.reply(
+                "❌ <b>Error:</b> Could not find the original file message.\n"
+                "🔄 <b>Please re-send the video and try again.</b>",
+                parse_mode=enums.ParseMode.HTML
+            )
+            return
+        
+        logger.info(f"Starting task {task_id}: action={action}, is_tg={is_tg}, "
+                     f"has_doc={bool(media_target and media_target.document)}, "
+                     f"has_vid={bool(media_target and media_target.video)}")
+        asyncio.create_task(execute_task_worker(client, cb.message.chat.id, task_id, action, media_msg=media_target, is_telegram_file=is_tg))
+
+# --- CANCEL COMMAND ---
+async def cancel_cmd(client, message):
+    cmd_text = message.text.strip()
+    task_id = None
+    if "_" in cmd_text:
+        task_id = cmd_text.split("_", 1)[1].split()[0]
+    elif len(message.command) > 1:
+        task_id = message.command[1]
+        
+    if task_id and (task_id in ACTIVE_TASKS or task_id in cancel_flags):
+        cancel_flags[task_id] = True
+        await message.reply(f"🛑 <b>Task <code>{task_id}</code> is stopping...</b>", parse_mode=enums.ParseMode.HTML)
+    else:
+        await message.reply("❌ Task not found or already finished.")
+
+# --- START COMMAND ---
+async def start_cmd(client, message):
+    await message.reply(
+        "⚡ <b>Colab Worker 4.0 is Online & Ready!</b>\n\n"
+        "• සිංහල Fonts (Noto Sans Sinhala / Abhaya Libre) & පිල්ලම් නිවැරදි කර ඇත.\n"
+        "• 4K සහ HEVC 10-bit Hard Subtitle සහාය දක්වයි.\n"
+        "• Use <code>/leech &lt;magnet_link&gt;</code> to download torrents.\n"
+        "• Send or reply to any video to open the <b>Encoding Panel</b>.\n"
+        "• Use <code>/help</code> for commands list (සිංහල).",
+        parse_mode=enums.ParseMode.HTML
+    )
+
+# --- START WEBSOCKET LOOP ---
+async def heartbeat_loop(websocket):
+    try:
+        while True:
+            await asyncio.sleep(10)
+            await websocket.send("ping")
+            await websocket.recv()
+    except websockets.exceptions.ConnectionClosed:
+        logger.warning("Master server disconnected!")
 
 async def main():
-    await app.start()
-    me = await app.get_me()
-    log("\n" + "=" * 60)
-    log(f"✅  Bot Online!  →  @{me.username}")
-    log("    Telegram එකේ /start එවලා පටන් ගන්න. නවත්තන්න Cell එක Stop කරන්න.")
-    log("=" * 60)
-    await idle()
-    await app.stop()
+    global app, user_app, upload_client, aria2_api
+    
+    key = str(random.randint(100000, 999999))
+    print("\n" + "=" * 65, flush=True)
+    print("🚀 COLAB WORKER v4.0 [Sinhala Subtitle & 4K Engine ACTIVE] 🚀", flush=True)
+    print(f"🔑 YOUR CONNECTION KEY IS: {key}", flush=True)
+    print("=" * 65 + "\n", flush=True)
+    
+    aria2_api = aria2p.API(aria2p.Client(host="http://localhost", port=6800, secret=""))
+    subprocess.Popen(["aria2c", "--enable-rpc=true", "--rpc-listen-all=false", "--rpc-listen-port=6800", "--daemon=true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    try:
+        setup_sinhala_fonts()
+    except Exception as fe:
+        logger.warning(f"Font setup error: {fe}")
+    
+    print(f"📡 Connecting to Master Server ({MASTER_WS_URL})...", flush=True)
+    try:
+        async with websockets.connect(MASTER_WS_URL) as ws:
+            await ws.send(key)
+            print(f"✅ Key {key} sent to Master! Now send /connect {key} in your Telegram bot.", flush=True)
+            response = await ws.recv()
+            data = json.loads(response)
+            
+            if data.get("status") != "AUTHORIZED": return
+            
+            api_id, api_hash, bot_token = data.get("API_ID"), data.get("API_HASH"), data.get("BOT_TOKEN")
+            premium_session = data.get("PREMIUM_SESSION")
+            app = Client("colab_worker", api_id=api_id, api_hash=api_hash, bot_token=bot_token, in_memory=True)
+            if premium_session:
+                try:
+                    user_app = Client("colab_user", api_id=api_id, api_hash=api_hash, session_string=premium_session, in_memory=True)
+                    await user_app.start()
+                    upload_client = user_app
+                    logger.info("✅ Premium User Session started successfully (4GB Uploads Enabled)!")
+                except Exception as pe:
+                    logger.warning(f"Could not start Premium User Session: {pe}")
+                    upload_client = app
+            else:
+                upload_client = app
+            
+            # Register Handlers: reply_handler must be FIRST so it captures wizard responses!
+            app.add_handler(MessageHandler(reply_handler, filters.reply))
+            app.add_handler(MessageHandler(start_cmd, filters.command("start")))
+            app.add_handler(MessageHandler(help_cmd, filters.command("help")))
+            app.add_handler(MessageHandler(panel_cmd, filters.command(["panel", "encode"])))
+            app.add_handler(MessageHandler(handle_leech, filters.command("leech")))
+            app.add_handler(MessageHandler(handle_url, filters.command("url")))
+            app.add_handler(MessageHandler(cancel_cmd, filters.regex(r"^/cancel")))
+            app.add_handler(MessageHandler(handle_telegram_file, (filters.document | filters.video)))
+            app.add_handler(MessageHandler(save_thumbnail, filters.photo))
+            app.add_handler(CallbackQueryHandler(cb_handler))
+            
+            asyncio.create_task(heartbeat_loop(ws))
+            asyncio.create_task(global_ui_loop())
+            await app.start()
+            logger.info("✅ Colab Worker 4.0 is ONLINE with Global Progress UI & Sinhala Subtitle Engine!")
+            await ws.wait_closed()
+            
+    except Exception as e:
+        logger.error(f"Failed to connect: {e}")
+    finally:
+        if user_app and user_app.is_connected: await user_app.stop()
+        if app and app.is_connected: await app.stop()
 
-
-os.makedirs(WORK_ROOT, exist_ok=True)
-try:
-    asyncio.get_event_loop().run_until_complete(main())
-except KeyboardInterrupt:
-    log("🛑 Bot නැවතුවා.")
+if __name__ == "__main__":
+    asyncio.run(main())
