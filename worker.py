@@ -15,6 +15,7 @@ import contextlib
 import subprocess
 import html
 import codecs
+import logging
 from pathlib import Path
 
 try:
