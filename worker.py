@@ -694,7 +694,8 @@ async def encode_video(input_path, output_path, resolution, total_duration, task
 # ----------------------------------------------------------------------------
 def patch_font(path):
     """Font එකේ U+25CC (◌ Dotted circle) Glyph එක ඉවත් කරනවා.
-    HarfBuzz ට තනි පිල්ලමකට ◌ එකතු කරන්න වෙන්නෙ Font එකේ ඒ Glyph එක තියෙනවා නම් විතරයි."""
+    HarfBuzz ට තනි පිල්ලමකට ◌ එකතු කරන්න වෙන්නෙ Font එකේ ඒ Glyph එක තියෙනවා නම් විතරයි.
+    (Windows වල Fonts වල ඒක නැති නිසා ඒවායේ ◌ පෙනෙන්නෙ නෑ.)"""
     try:
         from fontTools.ttLib import TTFont, TTCollection
         is_ttc = path.lower().endswith(".ttc")
@@ -702,7 +703,7 @@ def patch_font(path):
         changed = False
         for f in (obj.fonts if is_ttc else [obj]):
             cm = f.getBestCmap() or {}
-            if 0x25CC in cm:
+            if 0x0D9A in cm and 0x25CC in cm:
                 for t in f["cmap"].tables:
                     t.cmap.pop(0x25CC, None)
                 changed = True
@@ -754,45 +755,55 @@ def setup_sinhala_fonts():
         except Exception as e:
             logger.warning(f"fonttools install error: {e}")
 
-    # 2. Download Official Sinhala Fonts (Noto Sans Sinhala & Abhaya Libre) if missing
-    font_downloads = [
+    # 2. Download Official Noto Sans Sinhala (Regular & Bold) if missing
+    font_urls = [
         ("NotoSansSinhala-Regular.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Regular.ttf"),
-        ("NotoSansSinhala-Bold.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Bold.ttf"),
-        ("AbhayaLibre-Regular.ttf", "https://raw.githubusercontent.com/googlefonts/abhaya-libre/master/fonts/ttf/AbhayaLibre-Regular.ttf"),
-        ("AbhayaLibre-Bold.ttf", "https://raw.githubusercontent.com/googlefonts/abhaya-libre/master/fonts/ttf/AbhayaLibre-Bold.ttf")
+        ("NotoSansSinhala-Bold.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Bold.ttf")
     ]
-    for fname, url in font_downloads:
+    for fname, url in font_urls:
         dst = os.path.join(FONT_DIR, fname)
         if not os.path.exists(dst) or os.path.getsize(dst) < 1000:
             try:
                 import urllib.request
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=20) as resp:
+                with urllib.request.urlopen(req, timeout=15) as resp:
                     with open(dst, "wb") as f_out:
                         f_out.write(resp.read())
-                logger.info(f"✅ Sinhala font බාගත කරගන්නා ලදී: {fname}")
+                logger.info(f"✅ Sinhala Font බාගත කරගන්නා ලදී: {fname}")
             except Exception as e:
-                logger.warning(f"Failed to download {fname}: {e}")
+                logger.warning(f"Failed to fetch {fname}: {e}")
 
-    # 3. Copy system Sinhala fonts
+    # 3. Remove glitchy lklug font if present so fontconfig never falls back to it
+    for lklug_cand in [
+        "/usr/share/fonts/truetype/sinhala/lklug.ttf",
+        "/usr/share/fonts/truetype/lklug/lklug.ttf",
+        os.path.join(FONT_DIR, "lklug.ttf")
+    ]:
+        if os.path.exists(lklug_cand):
+            try:
+                os.remove(lklug_cand)
+            except Exception:
+                pass
+
+    # 4. Copy system Sinhala fonts (excluding lklug)
     try:
         res = subprocess.run("fc-list | grep -i sinhala | cut -d: -f1", shell=True, stdout=subprocess.PIPE, text=True)
         if res.stdout.strip():
             for f in res.stdout.strip().splitlines():
                 f = f.strip()
-                if f and os.path.isfile(f):
+                if f and os.path.isfile(f) and not f.lower().endswith("lklug.ttf"):
                     dst = os.path.join(FONT_DIR, os.path.basename(f))
                     if not os.path.exists(dst):
                         shutil.copy2(f, dst)
     except Exception as e:
         logger.warning(f"fc-list scan error: {e}")
 
-    # 4. Patch all fonts to remove dotted circle
-    cnt = patch_all_sinhala_fonts()
+    # 5. Patch all fonts to remove dotted circle
     try:
         subprocess.run(["fc-cache", "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+    cnt = patch_all_sinhala_fonts()
     if cnt > 0:
         logger.info(f"✅ සිංහල Fonts {cnt} ක ◌ (Dotted circle) ඉවත් කරා — පිල්ලම් කැඩෙන එක වැළකේ")
         print(f"✅ Sinhala Subtitle Engine: {cnt} font(s) patched (Dotted circle removed).")
@@ -821,43 +832,29 @@ ZWJ = "‍"
 HAS_SINHALA = re.compile("[඀-෿]")
 
 
-def normalize_sinhala_text(text):
-    """Normalize broken Sinhala sequences (split vowels, visual kombuva order, etc.)
-    Fixes cases like 'පො' -> 'පො', 'පේ' -> 'පේ', 'ෙපා' -> 'පො', and zero-width artifacts."""
-    if not text or not HAS_SINHALA.search(text):
-        return text
+def normalize_sinhala_text(t):
+    """Normalize broken Sinhala sequences (split vowels, lone base + sign, etc.)
+    Fixes 'ඔ්නෙ' -> 'ඕනෙ', 'ක්ලෝවර්' -> 'ක්ලෝවර්', 'පලිඟුමේ' -> 'පලිඟුමේ'."""
+    if not t:
+        return t
+    # 1. Standalone vowel letters typed as base + sign
+    t = re.sub(r'\u0d94\u0dca', '\u0d95', t)  # ඔ + ් -> ඕ
+    t = re.sub(r'\u0d85\u0dcf', '\u0d86', t)  # අ + ා -> ආ
+    t = re.sub(r'\u0d85\u0dd0', '\u0d87', t)  # අ + ැ -> ඇ
+    t = re.sub(r'\u0d85\u0dd1', '\u0d88', t)  # අ + ෑ -> ඈ
+    t = re.sub(r'\u0d8b\u0ddf', '\u0d8c', t)  # උ + ෟ -> ඌ
+    t = re.sub(r'\u0d91\u0dca', '\u0d92', t)  # එ + ් -> ඒ
+    t = re.sub(r'\u0d91\u0dd9', '\u0d93', t)  # එ + ෙ -> ඓ
 
-    text = text.replace('\u200b', '') # remove zero-width space
-    si_cons = r'[\u0d9a-\u0dc6]'
-    
-    # 1. Post-consonant split vowel fixes (very common in subtitle files):
-    # Consonant + ෙ + ා + ් -> Consonant + ෝ
-    text = re.sub(rf'({si_cons})\u0dd9\u0dcf\u0dca', lambda m: m.group(1) + '\u0ddd', text)
-    # Consonant + ෙ + ා -> Consonant + ො
-    text = re.sub(rf'({si_cons})\u0dd9\u0dcf', lambda m: m.group(1) + '\u0ddc', text)
-    # Consonant + ො + ් -> Consonant + ෝ
-    text = re.sub(rf'({si_cons})\u0ddc\u0dca', lambda m: m.group(1) + '\u0ddd', text)
-    # Consonant + ේ + ා -> Consonant + ෝ
-    text = re.sub(rf'({si_cons})\u0dda\u0dcf', lambda m: m.group(1) + '\u0ddd', text)
-    # Consonant + ෙ + ් -> Consonant + ේ
-    text = re.sub(rf'({si_cons})\u0dd9\u0dca', lambda m: m.group(1) + '\u0dda', text)
-    # Consonant + ෙ + ෙ -> Consonant + ෛ
-    text = re.sub(rf'({si_cons})\u0dd9\u0dd9', lambda m: m.group(1) + '\u0ddb', text)
-    # Consonant + ෙ + ෟ -> Consonant + ෞ
-    text = re.sub(rf'({si_cons})\u0dd9\u0ddf', lambda m: m.group(1) + '\u0dde', text)
-
-    # 2. Pre-consonant visual kombuva (only at start of line, word boundary, or after whitespace/punctuation/tags):
-    boundary = r'(?:^|[\s\(\[\{\<\,\.\:\;\!\?\"\'\-]|\{\\[^}]+\}|[^\u0d80-\u0dff])'
-    # ෙ + Consonant + ා + ් -> Consonant + ෝ
-    text = re.sub(rf'({boundary})\u0dd9({si_cons})\u0dcf\u0dca', lambda m: m.group(1) + m.group(2) + '\u0ddd', text)
-    # ෙ + Consonant + ා -> Consonant + ො
-    text = re.sub(rf'({boundary})\u0dd9({si_cons})\u0dcf', lambda m: m.group(1) + m.group(2) + '\u0ddc', text)
-    # ෙ + Consonant + ් -> Consonant + ේ
-    text = re.sub(rf'({boundary})\u0dd9({si_cons})\u0dca', lambda m: m.group(1) + m.group(2) + '\u0dda', text)
-    # ෙ + Consonant -> Consonant + ෙ
-    text = re.sub(rf'({boundary})\u0dd9({si_cons})', lambda m: m.group(1) + m.group(2) + '\u0dd9', text)
-    
-    return text
+    # 2. Split vowel signs
+    t = re.sub(r'\u0dd9\u0dcf\u0dca', '\u0ddd', t)  # ෙ + ා + ් -> ෝ
+    t = re.sub(r'\u0dd9\u0dcf', '\u0ddc', t)        # ෙ + ා -> ො
+    t = re.sub(r'\u0ddc\u0dca', '\u0ddd', t)        # ො + ් -> ෝ
+    t = re.sub(r'\u0dda\u0dcf', '\u0ddd', t)        # ේ + ා -> ෝ
+    t = re.sub(r'\u0dd9\u0dca', '\u0dda', t)        # ෙ + ් -> ේ
+    t = re.sub(r'\u0dd9\u0dd9', '\u0ddb', t)        # ෙ + ෙ -> ෛ
+    t = re.sub(r'\u0dd9\u0ddf', '\u0dde', t)        # ෙ + ෟ -> ෞ
+    return t
 
 
 def merge_sinhala_marks(text):
@@ -910,8 +907,8 @@ def prep_ass(src, dst):
             if HAS_SINHALA.search(parts[text_idx]):
                 st_idx = ev_cols.index("style") if "style" in ev_cols else 3
                 si_styles.add(parts[st_idx].strip().lstrip("*").lower())
-                norm = normalize_sinhala_text(parts[text_idx])
-                new = merge_sinhala_marks(norm)
+                merged_line = merge_sinhala_marks(parts[text_idx])
+                new = normalize_sinhala_text(merged_line)
                 if new != parts[text_idx]:
                     merged += 1
                     parts[text_idx] = new
@@ -919,16 +916,25 @@ def prep_ass(src, dst):
 
     # ---- Pass 2: නැති Fonts ආදේශ කරනවා ----
     fams = installed_families()
-    si_font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else ("Abhaya Libre" if "abhaya libre" in fams else "Noto Sans")
+    si_font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else "Noto Sans"
     latin_font = "Noto Sans" if "noto sans" in fams else si_font
     replaced, spacing_fixed = set(), set()
 
+    def is_sinhala_font_name(f):
+        low = f.strip().lower()
+        return any(k in low for k in ("sinhala", "fm", "dl", "kaputa", "kandy", "matara", "colombo", "abhaya"))
+
     def fix(name, sinhala):
         clean = name.strip().lstrip("@")
+        if sinhala:
+            if clean.lower() in fams and is_sinhala_font_name(clean):
+                return name
+            replaced.add(clean)
+            return si_font
         if not clean or clean.lower() in fams:
             return name
         replaced.add(clean)
-        return si_font if sinhala else latin_font
+        return latin_font
 
     sec, font_idx, name_idx, sp_idx = "", 1, 0, -1
     for n, line in enumerate(lines):
@@ -1006,7 +1012,7 @@ def srt_to_ass(src, dst, w, h):
                 break
 
     fams = installed_families()
-    font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else ("Abhaya Libre" if "abhaya libre" in fams else "Noto Sans")
+    font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else "Noto Sans"
     size = max(18, round(h * 0.058))
     ass = (f"[Script Info]\nScriptType: v4.00+\nPlayResX: {w}\nPlayResY: {h}\nWrapStyle: 0\n"
            "ScaledBorderAndShadow: yes\n\n[V4+ Styles]\n"
@@ -1204,10 +1210,11 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
                 cq, crf = "36", "34"
                 res_str = "480p"
             
+        pix_fmt_filter = "format=p010le" if hevc_10bit else "format=yuv420p"
         if scale:
-            vf = f"ass='{escaped_ass}':fontsdir='{escaped_font_dir}':shaping=complex,{scale}"
+            vf = f"ass='{escaped_ass}':fontsdir='{escaped_font_dir}':shaping=complex,{scale},{pix_fmt_filter}"
         else:
-            vf = f"ass='{escaped_ass}':fontsdir='{escaped_font_dir}':shaping=complex"
+            vf = f"ass='{escaped_ass}':fontsdir='{escaped_font_dir}':shaping=complex,{pix_fmt_filter}"
         
         if hevc_10bit:
             if has_nvenc:
@@ -1225,7 +1232,7 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
                 action = f"🔥 Hard Sub {res_str} (CPU)"
                 
         cmd = [
-            "ffmpeg", "-y", "-hwaccel", "auto", "-i", input_path,
+            "ffmpeg", "-hide_banner", "-y", "-i", input_path,
             "-vf", vf, *vcodec, "-c:a", "copy",
             "-map", "0:v:0", "-map", "0:a?", "-sn", "-map_chapters", "0",
             "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path
