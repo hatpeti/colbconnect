@@ -661,18 +661,27 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, tas
         raise Exception(f"FFMPEG Failed:\n{err.decode('utf-8', errors='ignore')[-1000:]}")
     return os.path.exists(output_path)
 
-async def encode_video(input_path, output_path, resolution, total_duration, task_id, filename):
+async def encode_video(input_path, output_path, resolution, total_duration, task_id, filename, hevc_10bit=False):
     has_nvenc = check_gpu()
-    if resolution == 1080: scale, cq, crf = "scale=-2:'min(1080,ih)'", "30", "28"
+    if resolution == 2160: scale, cq, crf = "scale=-2:'min(2160,ih)'", "26", "24"
+    elif resolution == 1080: scale, cq, crf = "scale=-2:'min(1080,ih)'", "30", "28"
     elif resolution == 720: scale, cq, crf = "scale=-2:'min(720,ih)'", "34", "32"
     else: scale, cq, crf = "scale=-2:'min(480,ih)'", "38", "36"
 
-    if has_nvenc:
-        vcodec = ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-cq", cq, "-pix_fmt", "yuv420p"]
-        action = f"⚙️ Encoding {resolution}p (GPU)"
+    if hevc_10bit:
+        if has_nvenc:
+            vcodec = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-qp", cq, "-pix_fmt", "p010le"]
+            action = f"⚙️ Encoding {resolution}p HEVC 10b (GPU)"
+        else:
+            vcodec = ["-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p10le"]
+            action = f"⚙️ Encoding {resolution}p HEVC 10b (CPU)"
     else:
-        vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
-        action = f"⚙️ Encoding {resolution}p (CPU)"
+        if has_nvenc:
+            vcodec = ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-cq", cq, "-pix_fmt", "yuv420p"]
+            action = f"⚙️ Encoding {resolution}p (GPU)"
+        else:
+            vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
+            action = f"⚙️ Encoding {resolution}p (CPU)"
 
     cmd = ["ffmpeg", "-y", "-hwaccel", "auto", "-i", input_path, "-vf", scale, *vcodec, "-c:a", "copy", "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?", "-map_chapters", "0", "-c:s", "copy", "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path]
     return await run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action, filename)
@@ -1110,6 +1119,9 @@ def get_panel_markup(task_id):
         [btn("480p", f"panel_480_{task_id}", style=enums.ButtonStyle.PRIMARY),
          btn("720p", f"panel_720_{task_id}", style=enums.ButtonStyle.PRIMARY),
          btn("1080p", f"panel_1080_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+        [btn("480p HEVC 10b", f"panel_480hevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("720p HEVC 10b", f"panel_720hevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("1080p HEVC 10b", f"panel_1080hevc_{task_id}", style=enums.ButtonStyle.PRIMARY)],
         [btn("🔥 Hard Sub", f"panel_hardsub_{task_id}", style=enums.ButtonStyle.PRIMARY),
          btn("🔥 Hard Sub HEVC 10b", f"panel_hardsubhevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
          btn("🔥 H Sub All", f"panel_hsuball_{task_id}", style=enums.ButtonStyle.PRIMARY)],
@@ -1119,6 +1131,7 @@ def get_panel_markup(task_id):
         [btn("🎵 Extract Audio", f"panel_extract_audio_{task_id}", style=enums.ButtonStyle.DEFAULT),
          btn("✏️ Rename", f"panel_rename_{task_id}", style=enums.ButtonStyle.SUCCESS)],
         [btn("🔄 Re-encode All", f"panel_reencode_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("🔄 Re-encode HEVC 10b", f"panel_reencodehevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
          btn("🚀 Upload Now", f"panel_upload_{task_id}", style=enums.ButtonStyle.SUCCESS)],
         [btn("❌ Cancel", f"panel_cancel_{task_id}", style=enums.ButtonStyle.DANGER)]
     ])
@@ -1173,15 +1186,18 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
     files_to_upload = []
     
     # Generate requested qualities based on action
-    if action in ["480", "720", "1080", "reencode"]:
-        res_list = [int(action)] if action != "reencode" else [480, 720, 1080]
-        if action == "reencode": files_to_upload.append(filepath) # Keep original
+    if action in ["480", "720", "1080", "480hevc", "720hevc", "1080hevc", "reencode", "reencodehevc"]:
+        is_hevc_enc = "hevc" in action
+        raw_res = action.replace("hevc", "")
+        res_list = [int(raw_res)] if raw_res != "reencode" else [480, 720, 1080]
+        if raw_res == "reencode": files_to_upload.append(filepath) # Keep original
         
         for res in res_list:
             if cancel_flags.get(task_id): break
-            out_file = generate_res_name(filename, res) + ".mkv"
+            tag = "_HEVC10" if is_hevc_enc else ""
+            out_file = generate_res_name(filename, res) + f"{tag}.mkv"
             out_path = os.path.join(os.path.dirname(filepath), out_file)
-            success = await encode_video(filepath, out_path, res, duration, task_id, out_file)
+            success = await encode_video(filepath, out_path, res, duration, task_id, out_file, hevc_10bit=is_hevc_enc)
             if success:
                 out_path = await apply_mkv_watermark(out_path)
                 files_to_upload.append(out_path)
@@ -1552,15 +1568,39 @@ async def execute_task_worker(client, chat_id, task_id, action, media_msg=None, 
             ACTIVE_TASKS.pop(task_id, None)
             cancel_flags.pop(task_id, None)
 
+VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".flv", ".webm", ".ts", ".m4v", ".wmv", ".3gp"}
+
 # --- TELEGRAM FILE HANDLER (PANEL TRIGGER FOR GROUPS & PRIVATE) ---
 async def handle_telegram_file(client, message):
     try:
+        # 1. If this message is a reply to ANY ongoing wizard or prompt, route to reply_handler immediately!
+        if message.reply_to_message:
+            return await reply_handler(client, message)
+
         media = message.document or message.video
         if not media: return
-        file_name = getattr(media, "file_name", None)
+        file_name = getattr(media, "file_name", "") or ""
+        ext = os.path.splitext(file_name)[1].lower()
+
+        # 2. If it's a subtitle file and there's a pending wizard waiting for subtitle in this chat:
+        if ext in [".ass", ".srt", ".vtt", ".sub"]:
+            for p_id, w_data in list(pending_hardsub_wizard.items()):
+                if w_data.get("chat_id") == message.chat.id and w_data.get("step") == "sub":
+                    try:
+                        message.reply_to_message = await client.get_messages(message.chat.id, int(p_id))
+                    except Exception:
+                        pass
+                    return await reply_handler(client, message)
+            # Standalone subtitle file with no active wizard: don't show video encoding panel!
+            return
+
+        # 3. Only trigger Video Encoding Panel for actual video files!
+        is_video = bool(message.video) or (ext in VIDEO_EXTS) or (getattr(media, "mime_type", "").startswith("video/"))
+        if not is_video:
+            return
+
         if not file_name:
-            if message.video: file_name = f"video_{message.id}.mp4"
-            else: file_name = f"file_{message.id}"
+            file_name = f"video_{message.id}.mp4"
         task_id = str(message.id)
         
         await message.reply_text(
@@ -1681,6 +1721,18 @@ async def handle_url(client, message):
 
 # --- THUMBNAIL HANDLER ---
 async def save_thumbnail(client, message):
+    if message.reply_to_message:
+        return await reply_handler(client, message)
+
+    # Check if there is an active Hard Sub wizard waiting for thumbnail in this chat:
+    for p_id, w_data in list(pending_hardsub_wizard.items()):
+        if w_data.get("chat_id") == message.chat.id and w_data.get("step") == "thumb":
+            try:
+                message.reply_to_message = await client.get_messages(message.chat.id, int(p_id))
+            except Exception:
+                pass
+            return await reply_handler(client, message)
+
     if message.photo:
         status = await message.reply("🖼️ <i>Downloading thumbnail...</i>", parse_mode=enums.ParseMode.HTML)
         try:
@@ -1749,16 +1801,21 @@ async def reply_handler(client, message):
                 sub_dir = f"/content/hsub_{w_data['task_id']}"
                 os.makedirs(sub_dir, exist_ok=True)
                 w_data["sub_path"] = await client.download_media(message, file_name=sub_dir + "/")
+                sub_fname = getattr(message.document or message.video, "file_name", "subtitle")
+                sub_info = f"✅ <b>Subtitle Received:</b> <code>{safe_html(sub_fname)}</code>\n\n"
             else:
                 w_data["sub_path"] = None
+                sub_info = "⏩ <b>Using Embedded Subtitles</b>\n\n"
 
             prompt = await message.reply(
+                f"{sub_info}"
                 f"<b>{act_title} — Step 2/3: Thumbnail</b>\n\n"
                 "🖼️ <b>Please reply with a Thumbnail image (Photo) for this Hard Sub video</b>\n\n"
                 "👉 <i>Send <code>/skip</code> to use video thumbnail / default thumbnail.</i>",
                 parse_mode=enums.ParseMode.HTML
             )
             w_data["step"] = "thumb"
+            w_data["chat_id"] = message.chat.id
             pending_hardsub_wizard[str(prompt.id)] = w_data
             return
 
@@ -1768,11 +1825,14 @@ async def reply_handler(client, message):
                 os.makedirs(thumb_dir, exist_ok=True)
                 raw_thumb = await client.download_media(message, file_name=os.path.join(thumb_dir, "thumb.jpg"))
                 w_data["thumb_path"] = await fix_thumb_jpeg(raw_thumb)
+                thumb_info = "✅ <b>Custom Thumbnail Received!</b>\n\n"
             else:
                 w_data["thumb_path"] = None
+                thumb_info = "⏩ <b>Using Default Thumbnail</b>\n\n"
 
             note = "<i>(For 'H Sub All', the bot will automatically generate [480p], [720p], [1080p], and your exact name for Original without adding [Original]!)</i>\n\n" if w_data["action"] == "hsuball" else ""
             prompt = await message.reply(
+                f"{thumb_info}"
                 f"<b>{act_title} — Step 3/3: Output Name</b>\n\n"
                 "✏️ <b>Please reply with the Output File Name:</b>\n"
                 "Example: <code>[AK] [S02-E01] Black Clover HEVC [HSUB].mkv</code>\n\n"
@@ -1781,6 +1841,7 @@ async def reply_handler(client, message):
                 parse_mode=enums.ParseMode.HTML
             )
             w_data["step"] = "rename"
+            w_data["chat_id"] = message.chat.id
             pending_hardsub_wizard[str(prompt.id)] = w_data
             return
 
@@ -1850,6 +1911,7 @@ async def reply_handler(client, message):
                     "step": "sub",
                     "action": action,
                     "task_id": task_id,
+                    "chat_id": message.chat.id,
                     "media_msg": message.reply_to_message,
                     "is_tg": True,
                     "sub_path": None,
@@ -1857,7 +1919,7 @@ async def reply_handler(client, message):
                     "custom_name": None
                 }
                 return
-            elif action in ["480", "720", "1080", "reencode", "removesub", "extract_sub", "extract_audio", "remaudio", "extract_thumb"]:
+            elif action in ["480", "720", "1080", "480hevc", "720hevc", "1080hevc", "reencode", "reencodehevc", "removesub", "extract_sub", "extract_audio", "remaudio", "extract_thumb"]:
                 task_id = str(message.id)
                 asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, action, media_msg=message.reply_to_message, is_telegram_file=True))
 
@@ -1913,6 +1975,7 @@ async def cb_handler(client, cb):
                 "step": "sub",
                 "action": action,
                 "task_id": task_id,
+                "chat_id": cb.message.chat.id,
                 "media_msg": media_target,
                 "is_tg": is_tg,
                 "sub_path": None,
@@ -2007,7 +2070,8 @@ async def main():
             else:
                 upload_client = app
             
-            # Register Handlers for Private AND Group chats
+            # Register Handlers: reply_handler must be FIRST so it captures wizard responses!
+            app.add_handler(MessageHandler(reply_handler, filters.reply))
             app.add_handler(MessageHandler(start_cmd, filters.command("start")))
             app.add_handler(MessageHandler(help_cmd, filters.command("help")))
             app.add_handler(MessageHandler(panel_cmd, filters.command(["panel", "encode"])))
@@ -2016,7 +2080,6 @@ async def main():
             app.add_handler(MessageHandler(cancel_cmd, filters.regex(r"^/cancel")))
             app.add_handler(MessageHandler(handle_telegram_file, (filters.document | filters.video)))
             app.add_handler(MessageHandler(save_thumbnail, filters.photo))
-            app.add_handler(MessageHandler(reply_handler, filters.reply))
             app.add_handler(CallbackQueryHandler(cb_handler))
             
             asyncio.create_task(heartbeat_loop(ws))
