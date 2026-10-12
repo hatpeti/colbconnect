@@ -614,9 +614,10 @@ async def apply_mkv_watermark(filepath, watermark=WATERMARK):
 
 def generate_res_name(original_name, target_res):
     name_without_ext = os.path.splitext(original_name)[0]
-    def res_repl(m): return f"{target_res}P" if 'P' in m.group(0) else f"{target_res}p"
+    res_label = "2160p" if str(target_res).lower() in ["2160", "4k"] else f"{target_res}p"
+    def res_repl(m): return res_label.upper() if 'P' in m.group(0) else res_label.lower()
     enc_base_name = re.sub(r'(?i)(1080p|720p|480p|2160p|4k|1080)', res_repl, name_without_ext)
-    if enc_base_name == name_without_ext: enc_base_name += f"_{target_res}p"
+    if enc_base_name == name_without_ext: enc_base_name += f"_{res_label}"
     return enc_base_name
 
 # --- FFMPEG & ENCODING OPERATIONS ---
@@ -663,25 +664,26 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, tas
 
 async def encode_video(input_path, output_path, resolution, total_duration, task_id, filename, hevc_10bit=False):
     has_nvenc = check_gpu()
-    if resolution == 2160: scale, cq, crf = "scale=-2:'min(2160,ih)'", "26", "24"
-    elif resolution == 1080: scale, cq, crf = "scale=-2:'min(1080,ih)'", "30", "28"
-    elif resolution == 720: scale, cq, crf = "scale=-2:'min(720,ih)'", "34", "32"
+    if resolution in [2160, "2160", "4k", "4K"]: scale, cq, crf = "scale=-2:'min(2160,ih)'", "26", "24"
+    elif resolution in [1080, "1080"]: scale, cq, crf = "scale=-2:'min(1080,ih)'", "30", "28"
+    elif resolution in [720, "720"]: scale, cq, crf = "scale=-2:'min(720,ih)'", "34", "32"
     else: scale, cq, crf = "scale=-2:'min(480,ih)'", "38", "36"
 
+    res_display = "4K" if resolution in [2160, "2160", "4k", "4K"] else f"{resolution}p"
     if hevc_10bit:
         if has_nvenc:
             vcodec = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-qp", cq, "-pix_fmt", "p010le"]
-            action = f"⚙️ Encoding {resolution}p HEVC 10b (GPU)"
+            action = f"⚙️ Encoding {res_display} HEVC 10b (GPU)"
         else:
             vcodec = ["-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p10le"]
-            action = f"⚙️ Encoding {resolution}p HEVC 10b (CPU)"
+            action = f"⚙️ Encoding {res_display} HEVC 10b (CPU)"
     else:
         if has_nvenc:
             vcodec = ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-cq", cq, "-pix_fmt", "yuv420p"]
-            action = f"⚙️ Encoding {resolution}p (GPU)"
+            action = f"⚙️ Encoding {res_display} (GPU)"
         else:
             vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
-            action = f"⚙️ Encoding {resolution}p (CPU)"
+            action = f"⚙️ Encoding {res_display} (CPU)"
 
     cmd = ["ffmpeg", "-y", "-hwaccel", "auto", "-i", input_path, "-vf", scale, *vcodec, "-c:a", "copy", "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?", "-map_chapters", "0", "-c:s", "copy", "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path]
     return await run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action, filename)
@@ -1065,7 +1067,11 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
         scale = None
         cq, crf = "28", "26"
         res_str = "Original"
-        if resolution in [1080, "1080"]:
+        if resolution in [2160, "2160", "4k", "4K"]:
+            scale = "scale=-2:'min(2160,ih)'"
+            cq, crf = "26", "24"
+            res_str = "4K"
+        elif resolution in [1080, "1080"]:
             scale = "scale=-2:'min(1080,ih)'"
             cq, crf = "30", "28"
             res_str = "1080p"
@@ -1077,6 +1083,19 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
             scale = "scale=-2:'min(480,ih)'"
             cq, crf = "38", "36"
             res_str = "480p"
+        else:
+            if height >= 2160:
+                cq, crf = "26", "24"
+                res_str = "4K"
+            elif height >= 1080:
+                cq, crf = "28", "26"
+                res_str = "1080p"
+            elif height >= 720:
+                cq, crf = "32", "30"
+                res_str = "720p"
+            else:
+                cq, crf = "36", "34"
+                res_str = "480p"
             
         if scale:
             vf = f"ass='{escaped_ass}':fontsdir='{escaped_font_dir}':shaping=complex,{scale}"
@@ -1118,13 +1137,16 @@ def get_panel_markup(task_id):
     return InlineKeyboardMarkup([
         [btn("480p", f"panel_480_{task_id}", style=enums.ButtonStyle.PRIMARY),
          btn("720p", f"panel_720_{task_id}", style=enums.ButtonStyle.PRIMARY),
-         btn("1080p", f"panel_1080_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+         btn("1080p", f"panel_1080_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("4K (2160p)", f"panel_2160_{task_id}", style=enums.ButtonStyle.PRIMARY)],
         [btn("480p HEVC 10b", f"panel_480hevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
-         btn("720p HEVC 10b", f"panel_720hevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
-         btn("1080p HEVC 10b", f"panel_1080hevc_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+         btn("720p HEVC 10b", f"panel_720hevc_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+        [btn("1080p HEVC 10b", f"panel_1080hevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("4K HEVC 10b", f"panel_2160hevc_{task_id}", style=enums.ButtonStyle.PRIMARY)],
         [btn("🔥 Hard Sub", f"panel_hardsub_{task_id}", style=enums.ButtonStyle.PRIMARY),
-         btn("🔥 Hard Sub HEVC 10b", f"panel_hardsubhevc_{task_id}", style=enums.ButtonStyle.PRIMARY),
-         btn("🔥 H Sub All", f"panel_hsuball_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+         btn("🔥 Hard Sub HEVC 10b", f"panel_hardsubhevc_{task_id}", style=enums.ButtonStyle.PRIMARY)],
+        [btn("🔥 H Sub All", f"panel_hsuball_{task_id}", style=enums.ButtonStyle.PRIMARY),
+         btn("🔥 H Sub All HEVC 10b", f"panel_hsuballhevc_{task_id}", style=enums.ButtonStyle.PRIMARY)],
         [btn("✂️ Remove Sub", f"panel_removesub_{task_id}", style=enums.ButtonStyle.DEFAULT),
          btn("📝 Add Sub", f"panel_addsub_{task_id}", style=enums.ButtonStyle.DEFAULT),
          btn("🔍 Extract Sub", f"panel_extract_sub_{task_id}", style=enums.ButtonStyle.DEFAULT)],
@@ -1148,11 +1170,15 @@ async def help_cmd(client, message):
         "<code>/480</code> - 480p වලට Convert කිරීම.\n"
         "<code>/720</code> - 720p වලට Convert කිරීම.\n"
         "<code>/1080</code> - 1080p වලට Convert කිරීම.\n"
-        "<code>/reencode</code> - 480p, 720p, 1080p සහ Original එකත් එක්ක File 4ක්ම ලබා දීම.\n\n"
+        "<code>/2160</code> හෝ <code>/4k</code> - 4K (2160p) වලට Convert කිරීම.\n"
+        "<code>/480hevc</code>, <code>/720hevc</code>, <code>/1080hevc</code>, <code>/2160hevc</code> (හෝ <code>/4khevc</code>) - HEVC 10-bit වලින් Convert කිරීම.\n"
+        "<code>/reencode</code> - 480p, 720p, 1080p සහ Original එකත් එක්ක Files ලබා දීම.\n"
+        "<code>/reencodehevc</code> - HEVC 10-bit වලින් All Resolutions Convert කිරීම.\n\n"
         "<b>🔥 Hard Sub:</b>\n"
         "<code>/hardsub</code> - Video එකේ ඇතුලේ තියෙන Subtitles Burn කිරීම (Original Resolution).\n"
-        "<code>/hardsubhevc</code> - Video එකේ ඇතුලේ තියෙන Subtitles HEVC 10-bit වලින් Burn කිරීම.\n"
-        "<code>/hsuball</code> - 480p, 720p, 1080p සහ Original එකටම Hard Sub Burn කර Telegram Streamable Video ලෙස ලබා දීම.\n\n"
+        "<code>/hardsubhevc</code> - Video එකේ ඇතුලේ තියෙන Subtitles HEVC 10-bit වලින් Burn කිරීම (Original / 4K).\n"
+        "<code>/hsuball</code> - 480p, 720p, 1080p සහ Original එකටම Hard Sub Burn කර Telegram Streamable Video ලෙස ලබා දීම.\n"
+        "<code>/hsuballhevc</code> - HEVC 10-bit වලින් All Resolutions Hard Sub Burn කර ලබා දීම.\n\n"
         "<b>✂️ Subtitles:</b>\n"
         "<code>/removesub</code> - Soft subtitles අයින් කිරීම.\n"
         "<code>/addsub</code> - Subtitle එකතු කිරීම (වීඩියෝ එකකට subtitle file එකක් reply කරන්න).\n"
@@ -1171,7 +1197,7 @@ async def help_cmd(client, message):
 # --- PROCESS MEDIA PIPELINE (CONCURRENCY CONTROLLED) ---
 async def process_media_file(client, chat_id, filepath, action, custom_renames, file_index, task_id, sub_path=None, audio_path=None, thumb_path=None):
     filename = os.path.basename(filepath)
-    is_hardsub = (action in ["hardsub", "hardsubhevc", "hsuball"])
+    is_hardsub = (action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"])
     if file_index in custom_renames and not is_hardsub:
         new_filename = custom_renames[file_index]
         new_filepath = os.path.join(os.path.dirname(filepath), new_filename)
@@ -1186,16 +1212,27 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
     files_to_upload = []
     
     # Generate requested qualities based on action
-    if action in ["480", "720", "1080", "480hevc", "720hevc", "1080hevc", "reencode", "reencodehevc"]:
+    if action in ["480", "720", "1080", "2160", "4k", "480hevc", "720hevc", "1080hevc", "2160hevc", "4khevc", "reencode", "reencodehevc"]:
         is_hevc_enc = "hevc" in action
         raw_res = action.replace("hevc", "")
-        res_list = [int(raw_res)] if raw_res != "reencode" else [480, 720, 1080]
+        if raw_res in ["4k", "4K"]:
+            raw_res = "2160"
+        res_list = [int(raw_res)] if raw_res != "reencode" else ([480, 720, 1080, 2160] if h >= 2160 else [480, 720, 1080])
         if raw_res == "reencode": files_to_upload.append(filepath) # Keep original
         
         for res in res_list:
             if cancel_flags.get(task_id): break
-            tag = "_HEVC10" if is_hevc_enc else ""
-            out_file = generate_res_name(filename, res) + f"{tag}.mkv"
+            clean_base = generate_res_name(filename, res)
+            if is_hevc_enc:
+                if "HEVC10" in clean_base:
+                    out_file = f"{clean_base}.mkv"
+                elif "HEVC" in clean_base:
+                    out_file = f"{re.sub(r'\\bHEVC\\b', 'HEVC10', clean_base)}.mkv"
+                else:
+                    out_file = f"{clean_base} [HEVC10].mkv"
+            else:
+                out_file = f"{clean_base}.mkv"
+
             out_path = os.path.join(os.path.dirname(filepath), out_file)
             success = await encode_video(filepath, out_path, res, duration, task_id, out_file, hevc_10bit=is_hevc_enc)
             if success:
@@ -1269,8 +1306,8 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
         proc = await asyncio.create_subprocess_exec(*cmd)
         await proc.communicate()
         if os.path.exists(out_path): files_to_upload.append(out_path)
-    elif action in ["hardsub", "hardsubhevc", "hsuball"]:
-        is_hevc = (action == "hardsubhevc")
+    elif action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"]:
+        is_hevc = (action in ["hardsubhevc", "hsuballhevc"])
         await extract_attachments_and_fonts(filepath)
         
         prepped_ass, temp_sub_dir = await extract_and_prep_subtitles(filepath, w, h, sub_path=sub_path)
@@ -1285,7 +1322,7 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
             return
 
         try:
-            if action == "hsuball":
+            if action in ["hsuball", "hsuballhevc"]:
                 res_list = [480, 720, 1080, "original"]
             else:
                 res_list = ["original"]
@@ -1298,17 +1335,23 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
                 if custom_base:
                     base_name, ext = os.path.splitext(custom_base)
                     ext = ext or ".mkv"
+                    if is_hevc:
+                        if "HEVC10" not in base_name:
+                            if "HEVC" in base_name:
+                                base_name = re.sub(r'\bHEVC\b', 'HEVC10', base_name)
+                            else:
+                                base_name = f"{base_name} HEVC10"
                     if res == "original":
                         out_name = f"{base_name}{ext}"
                     else:
                         out_name = f"{base_name} [{res}p]{ext}"
                 else:
                     base_name, _ = os.path.splitext(filename)
+                    tag = " HEVC10" if is_hevc else ""
                     if res == "original":
-                        tag = "_HSUB_HEVC10" if is_hevc else "_HSUB"
-                        out_name = f"{base_name}{tag}.mkv"
+                        out_name = f"{base_name}{tag} [HSUB].mkv"
                     else:
-                        out_name = f"{base_name}_[HSUB]_[{res}p].mkv"
+                        out_name = f"{base_name}{tag} [HSUB] [{res}p].mkv"
 
                 out_path = os.path.join(os.path.dirname(filepath), out_name)
                 is_same_file = (os.path.abspath(out_path) == os.path.abspath(filepath))
@@ -1337,7 +1380,7 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
         files_to_upload.append(filepath)
 
     # 2. Upload generated files (Streamable Video for Hard Sub, Document otherwise)
-    is_hardsub = (action in ["hardsub", "hardsubhevc", "hsuball"])
+    is_hardsub = (action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"])
     for f_path in files_to_upload:
         if cancel_flags.get(task_id): break
         f_name = os.path.basename(f_path)
@@ -1791,7 +1834,7 @@ async def reply_handler(client, message):
         w_data = pending_hardsub_wizard.pop(r_id)
         step = w_data["step"]
         is_skip = (text in ["/skip", "skip"])
-        act_title = "🔥 H Sub All" if w_data["action"] == "hsuball" else ("🔥 Hard Sub HEVC 10b" if w_data["action"] == "hardsubhevc" else "🔥 Hard Sub")
+        act_title = "🔥 H Sub All HEVC 10b" if w_data["action"] == "hsuballhevc" else ("🔥 H Sub All" if w_data["action"] == "hsuball" else ("🔥 Hard Sub HEVC 10b" if w_data["action"] == "hardsubhevc" else "🔥 Hard Sub"))
 
         if text.startswith("/cancel"):
             return await message.reply(f"🛑 <b>{act_title} setup cancelled.</b>", parse_mode=enums.ParseMode.HTML)
@@ -1830,7 +1873,7 @@ async def reply_handler(client, message):
                 w_data["thumb_path"] = None
                 thumb_info = "⏩ <b>Using Default Thumbnail</b>\n\n"
 
-            note = "<i>(For 'H Sub All', the bot will automatically generate [480p], [720p], [1080p], and your exact name for Original without adding [Original]!)</i>\n\n" if w_data["action"] == "hsuball" else ""
+            note = "<i>(For 'H Sub All', the bot will automatically generate [480p], [720p], [1080p], and your exact name for Original without adding [Original]!)</i>\n\n" if w_data["action"] in ["hsuball", "hsuballhevc"] else ""
             prompt = await message.reply(
                 f"{thumb_info}"
                 f"<b>{act_title} — Step 3/3: Output Name</b>\n\n"
@@ -1898,9 +1941,9 @@ async def reply_handler(client, message):
                 prompt = await message.reply("🎵 <b>Please reply to THIS message with your audio file (.aac, .m4a, .mp3, etc.)</b>", parse_mode=enums.ParseMode.HTML)
                 pending_audio_replies[str(prompt.id)] = message.reply_to_message
                 return
-            elif action in ["hardsub", "hardsubhevc", "hsuball"]:
+            elif action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"]:
                 task_id = str(message.id)
-                act_title = "🔥 H Sub All" if action == "hsuball" else ("🔥 Hard Sub HEVC 10b" if action == "hardsubhevc" else "🔥 Hard Sub")
+                act_title = "🔥 H Sub All HEVC 10b" if action == "hsuballhevc" else ("🔥 H Sub All" if action == "hsuball" else ("🔥 Hard Sub HEVC 10b" if action == "hardsubhevc" else "🔥 Hard Sub"))
                 prompt = await message.reply(
                     f"<b>{act_title} — Step 1/3: Subtitle</b>\n\n"
                     "📝 <b>Please reply to this message with your Subtitle file (.ass / .srt)</b>\n\n"
@@ -1919,7 +1962,7 @@ async def reply_handler(client, message):
                     "custom_name": None
                 }
                 return
-            elif action in ["480", "720", "1080", "480hevc", "720hevc", "1080hevc", "reencode", "reencodehevc", "removesub", "extract_sub", "extract_audio", "remaudio", "extract_thumb"]:
+            elif action in ["480", "720", "1080", "2160", "4k", "480hevc", "720hevc", "1080hevc", "2160hevc", "4khevc", "reencode", "reencodehevc", "removesub", "extract_sub", "extract_audio", "remaudio", "extract_thumb"]:
                 task_id = str(message.id)
                 asyncio.create_task(execute_task_worker(client, message.chat.id, task_id, action, media_msg=message.reply_to_message, is_telegram_file=True))
 
@@ -1961,9 +2004,9 @@ async def cb_handler(client, cb):
             pending_renames[str(prompt.id)] = {"task_id": task_id, "is_tg": is_tg, "media_msg": media_target}
             return
 
-        if action in ["hardsub", "hardsubhevc", "hsuball"]:
+        if action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"]:
             await cb.message.edit_reply_markup(None)
-            act_title = "🔥 H Sub All" if action == "hsuball" else ("🔥 Hard Sub HEVC 10b" if action == "hardsubhevc" else "🔥 Hard Sub")
+            act_title = "🔥 H Sub All HEVC 10b" if action == "hsuballhevc" else ("🔥 H Sub All" if action == "hsuball" else ("🔥 Hard Sub HEVC 10b" if action == "hardsubhevc" else "🔥 Hard Sub"))
             prompt = await cb.message.reply(
                 f"<b>{act_title} — Step 1/3: Subtitle</b>\n\n"
                 "📝 <b>Please reply to this message with your Subtitle file (.ass / .srt)</b>\n\n"
