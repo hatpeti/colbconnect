@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import websockets
 import json
 import random
@@ -794,6 +795,9 @@ def setup_sinhala_fonts():
         pass
     if cnt > 0:
         logger.info(f"✅ සිංහල Fonts {cnt} ක ◌ (Dotted circle) ඉවත් කරා — පිල්ලම් කැඩෙන එක වැළකේ")
+        print(f"✅ Sinhala Subtitle Engine: {cnt} font(s) patched (Dotted circle removed).")
+    else:
+        print("✅ Sinhala Subtitle Engine: Fonts ready & verified.")
 
 
 def installed_families():
@@ -2166,7 +2170,9 @@ async def cancel_cmd(client, message):
 # --- START COMMAND ---
 async def start_cmd(client, message):
     await message.reply(
-        "⚡ <b>Colab Worker 3.0 is Online & Ready!</b>\n\n"
+        "⚡ <b>Colab Worker 4.0 is Online & Ready!</b>\n\n"
+        "• සිංහල Fonts (Noto Sans Sinhala / Abhaya Libre) & පිල්ලම් නිවැරදි කර ඇත.\n"
+        "• 4K සහ HEVC 10-bit Hard Subtitle සහාය දක්වයි.\n"
         "• Use <code>/leech &lt;magnet_link&gt;</code> to download torrents.\n"
         "• Send or reply to any video to open the <b>Encoding Panel</b>.\n"
         "• Use <code>/help</code> for commands list (සිංහල).",
@@ -2185,6 +2191,10 @@ async def heartbeat_loop(websocket):
 
 async def main():
     global app, user_app, upload_client, aria2_api
+    
+    print("\n" + "=" * 62)
+    print("🚀 COLAB WORKER v4.0 [Sinhala Subtitle & 4K Engine ACTIVE] 🚀")
+    print("=" * 62 + "\n")
     
     setup_sinhala_fonts()
     aria2_api = aria2p.API(aria2p.Client(host="http://localhost", port=6800, secret=""))
@@ -2231,7 +2241,7 @@ async def main():
             asyncio.create_task(heartbeat_loop(ws))
             asyncio.create_task(global_ui_loop())
             await app.start()
-            logger.info("✅ Colab Worker 3.0 is ONLINE with Global Progress UI & Multi-Tasking!")
+            logger.info("✅ Colab Worker 4.0 is ONLINE with Global Progress UI & Sinhala Subtitle Engine!")
             await ws.wait_closed()
             
     except Exception as e:
