@@ -139,9 +139,33 @@ def get_system_stats():
 
     return cpu_pct, disk_free_str, disk_pct, ram_pct, uptime_str
 
+_gpu_encoder_cache = {}
+
 def check_gpu():
     try: return subprocess.run(["nvidia-smi"], capture_output=True, text=True).returncode == 0
     except: return False
+
+def check_gpu_encoder(codec="h264_nvenc"):
+    """Check if specific NVENC encoder actually works with the installed driver."""
+    if codec in _gpu_encoder_cache:
+        return _gpu_encoder_cache[codec]
+    if not check_gpu():
+        _gpu_encoder_cache[codec] = False
+        return False
+    try:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+               "color=c=black:s=64x64:d=0.1", "-pix_fmt", "yuv420p", "-c:v", codec, "-f", "null", "-"]
+        ok = (subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
+        _gpu_encoder_cache[codec] = ok
+        if not ok:
+            logger.warning(f"⚠️ GPU NVENC ({codec}) is not compatible with current driver. Falling back to CPU encoder.")
+        else:
+            logger.info(f"✅ GPU NVENC ({codec}) verified and working.")
+        return ok
+    except Exception as e:
+        logger.warning(f"Error testing encoder {codec}: {e}")
+        _gpu_encoder_cache[codec] = False
+        return False
 
 def format_bytes(size):
     try: size = float(size)
@@ -622,7 +646,7 @@ def generate_res_name(original_name, target_res):
     return enc_base_name
 
 # --- FFMPEG & ENCODING OPERATIONS ---
-async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action_name, filename):
+async def _run_ffmpeg_exec(cmd, input_path, output_path, total_duration, task_id, action_name, filename):
     process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     start_time = time.time()
     
@@ -660,11 +684,51 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, tas
     await process.wait()
     if process.returncode != 0:
         err = await process.stderr.read()
-        raise Exception(f"FFMPEG Failed:\n{err.decode('utf-8', errors='ignore')[-1000:]}")
-    return os.path.exists(output_path)
+        return False, err.decode("utf-8", errors="ignore")
+    return True, ""
+
+async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action_name, filename):
+    ok, err_text = await _run_ffmpeg_exec(cmd, input_path, output_path, total_duration, task_id, action_name, filename)
+    if ok:
+        return os.path.exists(output_path)
+
+    # Auto-fallback from NVENC to CPU if NVENC failed due to driver/API/parameter mismatch
+    if any(k in err_text.lower() for k in ("nvenc", "driver does not support", "minimum required nvidia driver", "error while opening encoder", "function not implemented")):
+        logger.warning(f"⚠️ NVENC error detected, automatically retrying with CPU (libx264/libx265)...")
+        cpu_cmd = []
+        skip_next = False
+        for i, arg in enumerate(cmd):
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "h264_nvenc":
+                cpu_cmd.append("libx264")
+            elif arg == "hevc_nvenc":
+                cpu_cmd.append("libx265")
+            elif arg in ("-qp", "-cq"):
+                cpu_cmd.append("-crf")
+            elif arg == "-preset" and i + 1 < len(cmd) and str(cmd[i + 1]).startswith("p"):
+                cpu_cmd.extend(["-preset", "veryfast"])
+                skip_next = True
+            elif arg in ("-tune", "-rc", "-rc-lookahead", "-spatial-aq", "-temporal-aq"):
+                skip_next = True
+            else:
+                cpu_cmd.append(arg)
+        
+        if os.path.exists(output_path):
+            try: os.remove(output_path)
+            except Exception: pass
+            
+        action_cpu = action_name.replace("(GPU)", "(CPU)") if "(GPU)" in action_name else action_name + " (CPU)"
+        ok_cpu, err_cpu = await _run_ffmpeg_exec(cpu_cmd, input_path, output_path, total_duration, task_id, action_cpu, filename)
+        if ok_cpu:
+            return os.path.exists(output_path)
+        raise Exception(f"FFMPEG Failed (Both GPU & CPU):\n{err_cpu[-1000:]}")
+
+    raise Exception(f"FFMPEG Failed:\n{err_text[-1000:]}")
 
 async def encode_video(input_path, output_path, resolution, total_duration, task_id, filename, hevc_10bit=False):
-    has_nvenc = check_gpu()
+    has_nvenc = check_gpu_encoder("hevc_nvenc" if hevc_10bit else "h264_nvenc")
     if resolution in [2160, "2160", "4k", "4K"]: scale, cq, crf = "scale=-2:'min(2160,ih)'", "26", "24"
     elif resolution in [1080, "1080"]: scale, cq, crf = "scale=-2:'min(1080,ih)'", "30", "28"
     elif resolution in [720, "720"]: scale, cq, crf = "scale=-2:'min(720,ih)'", "34", "32"
@@ -1154,7 +1218,7 @@ async def extract_and_prep_subtitles(video_path, width, height, sub_path=None):
 
 async def hardsub_video(input_path, output_path, total_duration, task_id, filename, hevc_10bit=False, external_sub_path=None, resolution=None, prepped_ass=None):
     """Burn embedded or external subtitles into video (hard sub) with full Sinhala text/font support."""
-    has_nvenc = check_gpu()
+    has_nvenc = check_gpu_encoder("hevc_nvenc" if hevc_10bit else "h264_nvenc")
     
     # 1. Extract embedded fonts/attachments from MKV into FONT_DIR and patch them (if not already done)
     if not prepped_ass:
