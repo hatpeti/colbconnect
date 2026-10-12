@@ -948,7 +948,9 @@ def read_text_file(path):
         return raw.decode("latin-1")
 
 
-def prep_ass(src, dst):
+def prep_ass(src, dst, emb=None):
+    """emb: වීඩියෝව ඇතුළේ Embed කරපු Fonts ({family(lower): {"si", "latin"}}). ඒවා Install කරපු ඒවා වගේම ගන්නවා."""
+    emb = emb or {}
     text = read_text_file(src)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
@@ -982,23 +984,21 @@ def prep_ass(src, dst):
     fams = installed_families()
     si_font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else "Noto Sans"
     latin_font = "Noto Sans" if "noto sans" in fams else si_font
-    replaced, spacing_fixed = set(), set()
-
-    def is_sinhala_font_name(f):
-        low = f.strip().lower()
-        return any(k in low for k in ("sinhala", "fm", "dl", "kaputa", "kandy", "matara", "colombo", "abhaya"))
+    replaced, spacing_fixed, used_emb = set(), set(), set()
+    en_override = {}   # සිංහල Style එකක English-only Line වලට යෙදිය යුතු Embedded English Font
 
     def fix(name, sinhala):
         clean = name.strip().lstrip("@")
-        if sinhala:
-            if clean.lower() in fams and is_sinhala_font_name(clean):
-                return name
-            replaced.add(clean)
-            return si_font
-        if not clean or clean.lower() in fams:
+        if not clean:
+            return name
+        e = emb.get(clean.lower())
+        if e and e["si" if sinhala else "latin"]:
+            used_emb.add(clean)       # වීඩියෝවේ Font එකම පාවිච්චි කරනවා
+            return name
+        if clean.lower() in fams:
             return name
         replaced.add(clean)
-        return latin_font
+        return si_font if sinhala else latin_font
 
     sec, font_idx, name_idx, sp_idx = "", 1, 0, -1
     for n, line in enumerate(lines):
@@ -1015,7 +1015,12 @@ def prep_ass(src, dst):
             parts = body.lstrip().split(",")
             if len(parts) > font_idx:
                 is_si = parts[name_idx].strip().lstrip("*").lower() in si_styles
-                parts[font_idx] = fix(parts[font_idx], is_si)
+                orig_font = parts[font_idx]
+                parts[font_idx] = fix(orig_font, is_si)
+                e = emb.get(orig_font.strip().lstrip("@").lower())
+                if is_si and parts[font_idx] != orig_font and e and e["latin"]:
+                    # Font එකේ සිංහල නෑ -> Style එකට සිංහල Font. නමුත් English Lines වලට වීඩියෝවේ Font එකම.
+                    en_override[parts[name_idx].strip().lstrip("*").lower()] = orig_font.strip().lstrip("@")
                 # Letter-spacing ≠ 0 නම් libass සිංහල Shaping කැඩෙනවා (ෙ ො ේ වැරදි තැනට යනවා)
                 if is_si and 0 <= sp_idx < len(parts):
                     try:
@@ -1027,6 +1032,15 @@ def prep_ass(src, dst):
                 lines[n] = head + ": " + ",".join(parts)
         elif sec.startswith("[events") and low.startswith(("dialogue:", "comment:")):
             sinhala = bool(HAS_SINHALA.search(line))
+            if en_override and not sinhala and low.startswith("dialogue:") and ev_cols:
+                head, body = line.split(":", 1)
+                parts = body.lstrip().split(",", text_idx)
+                st_idx = ev_cols.index("style") if "style" in ev_cols else 3
+                font = en_override.get(parts[st_idx].strip().lstrip("*").lower()) if len(parts) > text_idx else None
+                if font:
+                    parts[text_idx] = "{\\fn" + font + "}" + parts[text_idx]
+                    line = head + ": " + ",".join(parts)
+                    used_emb.add(font)
             if "\\fn" in line:
                 line = re.sub(r"\\fn([^\\}]+)", lambda m: "\\fn" + fix(m.group(1), sinhala), line)
             if sinhala and "\\fsp" in line:
@@ -1035,7 +1049,7 @@ def prep_ass(src, dst):
 
     with open(dst, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines))
-    return sorted(replaced), merged
+    return sorted(replaced), merged, sorted(used_emb)
 
 
 def srt_to_ass(src, dst, w, h):
@@ -1092,74 +1106,170 @@ def srt_to_ass(src, dst, w, h):
     return len(events)
 
 
-async def extract_attachments_and_fonts(video_path):
-    """Extract embedded fonts/attachments from MKV into FONT_DIR and patch them."""
-    os.makedirs(FONT_DIR, exist_ok=True)
-    temp_fonts_dir = os.path.join(os.path.dirname(video_path), f"temp_fonts_{int(time.time())}_{random.randint(100,999)}")
-    os.makedirs(temp_fonts_dir, exist_ok=True)
+def extract_embedded_fonts(video, dest):
+    """වීඩියෝව (MKV) ඇතුළේ Attachment විදිහට තියෙන Fonts dest එකට Extract කරලා,
+    ඒවායේ Family නම් -> {'si': සිංහල Glyphs තියෙනවද, 'latin': English Glyphs තියෙනවද} Dict එකක් දෙනවා."""
+    os.makedirs(dest, exist_ok=True)
     try:
-        extracted_via_mkv = False
-        if video_path.lower().endswith(".mkv"):
-            try:
-                proc_meta = await asyncio.create_subprocess_exec(
-                    "mkvmerge", "-J", video_path,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
-                )
-                stdout, _ = await proc_meta.communicate()
-                info = json.loads(stdout or b"{}")
-                att_args = []
-                for att in info.get("attachments", []):
-                    aid = att.get("id")
-                    aname = att.get("file_name", f"font_{aid}.ttf")
-                    if aname.lower().endswith((".ttf", ".otf", ".ttc")):
-                        att_args.append(f"{aid}:{os.path.join(temp_fonts_dir, aname)}")
-                if att_args:
-                    proc_ex = await asyncio.create_subprocess_exec(
-                        "mkvextract", "attachments", video_path, *att_args,
-                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-                    )
-                    await proc_ex.communicate()
-                    extracted_via_mkv = True
-            except Exception as e:
-                logger.warning(f"mkvextract extraction warning: {e}")
-
-        if not extracted_via_mkv:
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-dump_attachment:t", "", "-i", video_path,
-                cwd=temp_fonts_dir,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
-            )
-            await proc.communicate()
-        
-        fonts_found = False
-        for root, _, files in os.walk(temp_fonts_dir):
-            for file in files:
-                if file.lower().endswith((".ttf", ".otf", ".ttc")):
-                    src_f = os.path.join(root, file)
-                    dst_f = os.path.join(FONT_DIR, file)
-                    shutil.copy2(src_f, dst_f)
-                    patch_font(dst_f)
-                    fonts_found = True
-        if fonts_found:
-            try:
-                subprocess.run(["fc-cache", "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
+        r = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", video],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+        streams = json.loads(r.stdout or b"{}").get("streams", [])
+        atts = [s for s in streams if s.get("codec_type") == "attachment"]
+        if not atts:
+            return {}
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+        for n in range(len(atts)):
+            cmd += [f"-dump_attachment:t:{n}", os.path.join(dest, f"emb_{n}.bin")]
+        cmd += ["-i", video, "-t", "0", "-f", "null", "-"]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
     except Exception as e:
-        logger.warning(f"Error extracting attachments: {e}")
-    finally:
-        shutil.rmtree(temp_fonts_dir, ignore_errors=True)
+        logger.warning(f"Embedded Fonts Extract error: {e}")
+        return {}
+
+    from fontTools.ttLib import TTFont, TTCollection
+    fams = {}
+    for fn in sorted(os.listdir(dest)):
+        if not fn.startswith("emb_") or not fn.endswith(".bin"):
+            continue
+        p = os.path.join(dest, fn)
+        try:
+            with open(p, "rb") as fh:
+                magic = fh.read(4)
+            ext = {b"OTTO": ".otf", b"ttcf": ".ttc", b"\x00\x01\x00\x00": ".ttf", b"true": ".ttf"}.get(magic)
+            if not ext or os.path.getsize(p) > 30 * 1024 * 1024:
+                os.remove(p)
+                continue
+            np_ = p[:-4] + ext
+            os.replace(p, np_)
+            patch_font(np_)
+            obj = TTCollection(np_, lazy=True) if ext == ".ttc" else TTFont(np_, lazy=True)
+            for f in (obj.fonts if ext == ".ttc" else [obj]):
+                cm = f.getBestCmap() or {}
+                info = {"si": 0x0D9A in cm, "latin": 0x41 in cm and 0x61 in cm}
+                for rec in f["name"].names:
+                    if rec.nameID in (1, 4, 6, 16):
+                        try:
+                            nm = rec.toUnicode().strip().lower()
+                        except Exception:
+                            continue
+                        if nm:
+                            cur = fams.setdefault(nm, {"si": False, "latin": False})
+                            cur["si"] |= info["si"]
+                            cur["latin"] |= info["latin"]
+        except Exception as e:
+            logger.warning(f"Embedded Font කියවන්න බැරි වුනා ({fn}): {e}")
+    return fams
+
+
+# ----------------------------------------------------------------------------
+#  ENCODER & BITRATE HELPERS (Ported directly from bot.py)
+# ----------------------------------------------------------------------------
+QUALITY_BOOST = 1.3
+
+def _v(b):
+    return str(int(b))
+
+def _hevc_full(v, m, b):
+    return ["-c:v", "hevc_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr",
+            "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b),
+            "-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1", "-tag:v", "hvc1"]
+
+def _hevc_simple(v, m, b):
+    return ["-c:v", "hevc_nvenc", "-preset", "medium", "-rc", "vbr",
+            "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b), "-tag:v", "hvc1"]
+
+def _h264_nv(v, m, b):
+    return ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr",
+            "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b), "-profile:v", "high"]
+
+def _x264(v, m, b):
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-maxrate", _v(m), "-bufsize", _v(b)]
+
+GPU_ENCODERS = [("hevc_nvenc (T4 GPU)", "hevc", _hevc_full),
+                ("hevc_nvenc (T4 GPU)", "hevc", _hevc_simple),
+                ("h264_nvenc (T4 GPU)", "h264", _h264_nv)]
+CPU_ENCODER = ("libx264 (CPU)", "h264", _x264)
+
+_detected_gpu_enc = None
+_gpu_enc_checked = False
+
+def detect_gpu_encoder():
+    global _detected_gpu_enc, _gpu_enc_checked
+    if _gpu_enc_checked:
+        return _detected_gpu_enc
+    for enc in GPU_ENCODERS:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+               "color=c=black:s=640x360:d=0.5", "-pix_fmt", "yuv420p",
+               *enc[2](1_000_000, 1_600_000, 3_200_000), "-f", "null", "-"]
+        if subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0:
+            _detected_gpu_enc = enc
+            _gpu_enc_checked = True
+            return enc
+    _detected_gpu_enc = None
+    _gpu_enc_checked = True
+    return None
+
+async def probe_video_stats(path):
+    p = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out, _ = await p.communicate()
+    j = json.loads(out or b"{}")
+    v = next((s for s in j.get("streams", []) if s.get("codec_type") == "video"), None)
+    dur = float(j.get("format", {}).get("duration") or (v.get("duration") if v else 0) or 0)
+
+    def sbps(s):
+        for val in (s.get("bit_rate"), (s.get("tags") or {}).get("BPS")):
+            try: return float(val)
+            except (TypeError, ValueError): pass
+        return 0.0
+
+    audios = [s for s in j.get("streams", []) if s.get("codec_type") == "audio"]
+    a_bps = sum(sbps(a) or 128_000 for a in audios)
+    total = (os.path.getsize(path) * 8 / dur) if dur else float(j.get("format", {}).get("bit_rate") or 0)
+    a_bps = min(a_bps, total * 0.5)
+    real_v = max(total - a_bps, total * 0.3)
+    v_bps = min(sbps(v) or real_v, real_v * 1.15) if v else real_v
+    v_bps = v_bps or 1_500_000
+    vcodec = v.get("codec_name", "") if v else ""
+    return {"dur": dur, "w": int(v.get("width", 1280) if v else 1280), "h": int(v.get("height", 720) if v else 720),
+            "vcodec": vcodec, "v_bps": v_bps,
+            "acodecs": [a.get("codec_name", "") for a in audios]}
+
+def target_bitrate(info, out_codec):
+    efficient = info["vcodec"] in ("hevc", "av1", "vp9")
+    if out_codec == "hevc":
+        f = QUALITY_BOOST if efficient else 0.9
+    else:
+        f = QUALITY_BOOST * 1.5 if efficient else 1.3
+    return min(max(info["v_bps"] * f, 350_000), 30_000_000)
 
 
 async def extract_and_prep_subtitles(video_path, width, height, sub_path=None):
-    """Extract embedded subtitle or use provided sub, convert to ASS if needed, and run prep_ass."""
+    """Extract embedded subtitle or use provided sub, dump embedded fonts to vfonts, and run prep_ass."""
     temp_dir = os.path.join(os.path.dirname(video_path), f"temp_sub_{int(time.time())}_{random.randint(100,999)}")
     os.makedirs(temp_dir, exist_ok=True)
     
+    # 1. Setup vfonts directory inside temp_dir
+    vfonts = os.path.join(temp_dir, "vfonts")
+    os.makedirs(vfonts, exist_ok=True)
+    
+    # 2. Extract embedded fonts into vfonts (bot.py logic)
+    emb = await asyncio.to_thread(extract_embedded_fonts, video_path, vfonts)
+    
+    # 3. Copy system fonts from FONT_DIR (~/.fonts) into vfonts
+    if os.path.isdir(FONT_DIR):
+        for fn in os.listdir(FONT_DIR):
+            if fn.lower().endswith((".ttf", ".otf", ".ttc")) and not os.path.exists(os.path.join(vfonts, fn)):
+                try:
+                    shutil.copy2(os.path.join(FONT_DIR, fn), vfonts)
+                except Exception:
+                    pass
+    
+    # 4. Subtitle extraction
     raw_sub = None
     sub_ext = None
-    
     if sub_path and os.path.exists(sub_path):
         sub_ext = os.path.splitext(sub_path)[1].lower()
         raw_sub = os.path.join(temp_dir, "input" + sub_ext)
@@ -1169,7 +1279,7 @@ async def extract_and_prep_subtitles(video_path, width, height, sub_path=None):
         sub_streams = [s for s in info.get("streams", []) if s.get("codec_type") == "subtitle"]
         if not sub_streams:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            return None, None
+            return None, None, None
             
         chosen_stream = None
         for s in sub_streams:
@@ -1202,7 +1312,7 @@ async def extract_and_prep_subtitles(video_path, width, height, sub_path=None):
         
         if not os.path.exists(raw_sub) or os.path.getsize(raw_sub) == 0:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            return None, None
+            return None, None, None
 
     ass_input = raw_sub
     if sub_ext in (".srt", ".vtt", ".txt"):
@@ -1211,98 +1321,84 @@ async def extract_and_prep_subtitles(video_path, width, height, sub_path=None):
         ass_input = converted_ass
 
     prepped_ass = os.path.join(temp_dir, "prepped.ass")
-    await asyncio.to_thread(prep_ass, ass_input, prepped_ass)
+    await asyncio.to_thread(prep_ass, ass_input, prepped_ass, emb)
     
-    return prepped_ass, temp_dir
+    return prepped_ass, vfonts, temp_dir
 
 
-async def hardsub_video(input_path, output_path, total_duration, task_id, filename, hevc_10bit=False, external_sub_path=None, resolution=None, prepped_ass=None):
-    """Burn embedded or external subtitles into video (hard sub) with full Sinhala text/font support."""
-    has_nvenc = check_gpu_encoder("hevc_nvenc" if hevc_10bit else "h264_nvenc")
-    
-    # 1. Extract embedded fonts/attachments from MKV into FONT_DIR and patch them (if not already done)
-    if not prepped_ass:
-        await extract_attachments_and_fonts(input_path)
-    
-    # 2. Get video dimensions
-    duration, width, height = await get_video_meta(input_path)
-    
+async def hardsub_video(input_path, output_path, total_duration, task_id, filename, hevc_10bit=False, external_sub_path=None, resolution=None, prepped_ass=None, vfonts_dir=None):
+    """Burn embedded or external subtitles into video (hard sub) matching bot.py ASS & font engine."""
     temp_sub_dir = None
-    if not prepped_ass:
-        # Extract and prepare subtitles with Sinhala fixing
-        prepped_ass, temp_sub_dir = await extract_and_prep_subtitles(input_path, width, height, sub_path=external_sub_path)
+    if not prepped_ass or not vfonts_dir:
+        duration, width, height = await get_video_meta(input_path)
+        prepped_ass, vfonts_dir, temp_sub_dir = await extract_and_prep_subtitles(input_path, width, height, sub_path=external_sub_path)
         if not prepped_ass or not os.path.exists(prepped_ass):
             logger.error(f"No valid subtitle found for hardsub in {filename}")
             raise RuntimeError("වීඩියෝවේ Subtitles හමුවූයේ නැත. (No subtitle tracks found to burn)")
-        
+
     try:
-        # Build filter with shaping=complex and fontsdir
+        # Build filter with shaping=complex and fontsdir pointed to vfonts
         escaped_ass = prepped_ass.replace('\\', '/').replace("'", "'\\''").replace(":", "\\:")
-        escaped_font_dir = FONT_DIR.replace('\\', '/').replace("'", "'\\''").replace(":", "\\:")
-        
+        escaped_vfonts = vfonts_dir.replace('\\', '/').replace("'", "'\\''").replace(":", "\\:")
+
+        info = await probe_video_stats(input_path)
+        out_codec = "hevc" if hevc_10bit else "h264"
+        tb = target_bitrate(info, out_codec)
+
         # Resolution scaling
         scale = None
-        cq, crf = "28", "26"
         res_str = "Original"
         if resolution in [2160, "2160", "4k", "4K"]:
             scale = "scale=-2:'min(2160,ih)'"
-            cq, crf = "26", "24"
             res_str = "4K"
         elif resolution in [1080, "1080"]:
             scale = "scale=-2:'min(1080,ih)'"
-            cq, crf = "30", "28"
             res_str = "1080p"
+            tb = min(tb, 4_500_000)
         elif resolution in [720, "720"]:
             scale = "scale=-2:'min(720,ih)'"
-            cq, crf = "34", "32"
             res_str = "720p"
+            tb = min(tb, 2_200_000)
         elif resolution in [480, "480"]:
             scale = "scale=-2:'min(480,ih)'"
-            cq, crf = "38", "36"
             res_str = "480p"
-        else:
-            if height >= 2160:
-                cq, crf = "26", "24"
-                res_str = "4K"
-            elif height >= 1080:
-                cq, crf = "28", "26"
-                res_str = "1080p"
-            elif height >= 720:
-                cq, crf = "32", "30"
-                res_str = "720p"
-            else:
-                cq, crf = "36", "34"
-                res_str = "480p"
-            
+            tb = min(tb, 1_100_000)
+
         pix_fmt_filter = "format=p010le" if hevc_10bit else "format=yuv420p"
         if scale:
-            vf = f"ass='{escaped_ass}':fontsdir='{escaped_font_dir}':shaping=complex,{scale},{pix_fmt_filter}"
+            vf = f"ass='{escaped_ass}':fontsdir='{escaped_vfonts}':shaping=complex,{scale},{pix_fmt_filter}"
         else:
-            vf = f"ass='{escaped_ass}':fontsdir='{escaped_font_dir}':shaping=complex,{pix_fmt_filter}"
-        
+            vf = f"ass='{escaped_ass}':fontsdir='{escaped_vfonts}':shaping=complex,{pix_fmt_filter}"
+
+        gpu_enc = detect_gpu_encoder()
+        attempts = []
         if hevc_10bit:
-            if has_nvenc:
-                vcodec = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-qp", cq, "-pix_fmt", "p010le"]
-                action = f"🔥 Hard Sub HEVC 10b {res_str} (GPU)"
-            else:
-                vcodec = ["-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p10le"]
-                action = f"🔥 Hard Sub HEVC 10b {res_str} (CPU)"
+            if gpu_enc and gpu_enc[1] == "hevc":
+                attempts.append((gpu_enc[2](tb, tb * 1.6, tb * 3.2), f"🔥 Hard Sub HEVC 10b {res_str} (GPU)"))
+            attempts.append((["-c:v", "libx265", "-preset", "veryfast", "-crf", "24", "-maxrate", _v(tb * 1.6), "-bufsize", _v(tb * 3.2)], f"🔥 Hard Sub HEVC 10b {res_str} (CPU)"))
         else:
-            if has_nvenc:
-                vcodec = ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-qp", cq, "-pix_fmt", "yuv420p"]
-                action = f"🔥 Hard Sub {res_str} (GPU)"
-            else:
-                vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
-                action = f"🔥 Hard Sub {res_str} (CPU)"
-                
-        cmd = [
-            "ffmpeg", "-hide_banner", "-y", "-i", input_path,
-            "-vf", vf, *vcodec, "-c:a", "copy",
-            "-map", "0:v:0", "-map", "0:a?", "-sn", "-map_chapters", "0",
-            "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path
-        ]
-        
-        return await run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action, filename)
+            if gpu_enc:
+                if gpu_enc[1] == "h264":
+                    attempts.append((gpu_enc[2](tb, tb * 1.6, tb * 3.2), f"🔥 Hard Sub {res_str} (GPU)"))
+                else:
+                    attempts.append((_h264_nv(tb, tb * 1.6, tb * 3.2), f"🔥 Hard Sub {res_str} (GPU)"))
+            attempts.append((["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-maxrate", _v(tb * 1.6), "-bufsize", _v(tb * 3.2)], f"🔥 Hard Sub {res_str} (CPU)"))
+
+        for vcodec, action in attempts:
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y", "-i", input_path,
+                "-vf", vf, *vcodec, "-c:a", "copy",
+                "-map", "0:v:0", "-map", "0:a?", "-sn", "-map_chapters", "0",
+                "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path
+            ]
+            if os.path.exists(output_path):
+                try: os.remove(output_path)
+                except Exception: pass
+            success = await run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action, filename)
+            if success and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                return True
+            logger.warning(f"Hardsub attempt with {action} failed, trying next fallback...")
+        return False
     finally:
         if temp_sub_dir and os.path.exists(temp_sub_dir):
             shutil.rmtree(temp_sub_dir, ignore_errors=True)
@@ -1486,9 +1582,7 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
         if os.path.exists(out_path): files_to_upload.append(out_path)
     elif action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"]:
         is_hevc = (action in ["hardsubhevc", "hsuballhevc"])
-        await extract_attachments_and_fonts(filepath)
-        
-        prepped_ass, temp_sub_dir = await extract_and_prep_subtitles(filepath, w, h, sub_path=sub_path)
+        prepped_ass, vfonts_dir, temp_sub_dir = await extract_and_prep_subtitles(filepath, w, h, sub_path=sub_path)
         if not prepped_ass or not os.path.exists(prepped_ass):
             logger.error(f"No valid subtitle found for hardsub in {filename}")
             with contextlib.suppress(Exception):
@@ -1537,7 +1631,7 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
                 try:
                     success = await hardsub_video(
                         filepath, enc_out_path, duration, task_id, out_name,
-                        hevc_10bit=is_hevc, prepped_ass=prepped_ass, resolution=res
+                        hevc_10bit=is_hevc, prepped_ass=prepped_ass, vfonts_dir=vfonts_dir, resolution=res
                     )
                     if success:
                         if is_same_file:
