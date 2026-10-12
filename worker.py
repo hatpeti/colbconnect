@@ -693,8 +693,7 @@ async def encode_video(input_path, output_path, resolution, total_duration, task
 # ----------------------------------------------------------------------------
 def patch_font(path):
     """Font එකේ U+25CC (◌ Dotted circle) Glyph එක ඉවත් කරනවා.
-    HarfBuzz ට තනි පිල්ලමකට ◌ එකතු කරන්න වෙන්නෙ Font එකේ ඒ Glyph එක තියෙනවා නම් විතරයි.
-    (Windows වල Fonts වල ඒක නැති නිසා ඒවායේ ◌ පෙනෙන්නෙ නෑ.)"""
+    HarfBuzz ට තනි පිල්ලමකට ◌ එකතු කරන්න වෙන්නෙ Font එකේ ඒ Glyph එක තියෙනවා නම් විතරයි."""
     try:
         from fontTools.ttLib import TTFont, TTCollection
         is_ttc = path.lower().endswith(".ttc")
@@ -702,7 +701,7 @@ def patch_font(path):
         changed = False
         for f in (obj.fonts if is_ttc else [obj]):
             cm = f.getBestCmap() or {}
-            if 0x0D9A in cm and 0x25CC in cm:
+            if 0x25CC in cm:
                 for t in f["cmap"].tables:
                     t.cmap.pop(0x25CC, None)
                 changed = True
@@ -710,6 +709,7 @@ def patch_font(path):
             tmp = path + ".tmp"
             obj.save(tmp)
             os.replace(tmp, path)
+            logger.info(f"✅ Font Patched (removed ◌): {os.path.basename(path)}")
         return changed
     except Exception as e:
         logger.warning(f"Font Patch අසාර්ථකයි ({os.path.basename(path)}): {e}")
@@ -742,6 +742,38 @@ def patch_all_sinhala_fonts():
 
 def setup_sinhala_fonts():
     os.makedirs(FONT_DIR, exist_ok=True)
+
+    # 1. Ensure fonttools is installed
+    try:
+        import fontTools
+    except ImportError:
+        try:
+            logger.info("📦 fonttools ස්ථාපනය වෙමින් පවතී...")
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "fonttools"], check=True)
+        except Exception as e:
+            logger.warning(f"fonttools install error: {e}")
+
+    # 2. Download Official Sinhala Fonts (Noto Sans Sinhala & Abhaya Libre) if missing
+    font_downloads = [
+        ("NotoSansSinhala-Regular.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Regular.ttf"),
+        ("NotoSansSinhala-Bold.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Bold.ttf"),
+        ("AbhayaLibre-Regular.ttf", "https://raw.githubusercontent.com/googlefonts/abhaya-libre/master/fonts/ttf/AbhayaLibre-Regular.ttf"),
+        ("AbhayaLibre-Bold.ttf", "https://raw.githubusercontent.com/googlefonts/abhaya-libre/master/fonts/ttf/AbhayaLibre-Bold.ttf")
+    ]
+    for fname, url in font_downloads:
+        dst = os.path.join(FONT_DIR, fname)
+        if not os.path.exists(dst) or os.path.getsize(dst) < 1000:
+            try:
+                import urllib.request
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    with open(dst, "wb") as f_out:
+                        f_out.write(resp.read())
+                logger.info(f"✅ Sinhala font බාගත කරගන්නා ලදී: {fname}")
+            except Exception as e:
+                logger.warning(f"Failed to download {fname}: {e}")
+
+    # 3. Copy system Sinhala fonts
     try:
         res = subprocess.run("fc-list | grep -i sinhala | cut -d: -f1", shell=True, stdout=subprocess.PIPE, text=True)
         if res.stdout.strip():
@@ -751,12 +783,17 @@ def setup_sinhala_fonts():
                     dst = os.path.join(FONT_DIR, os.path.basename(f))
                     if not os.path.exists(dst):
                         shutil.copy2(f, dst)
-        subprocess.run(["fc-cache", "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        cnt = patch_all_sinhala_fonts()
-        if cnt > 0:
-            logger.info(f"✅ සිංහල Fonts {cnt} ක ◌ (Dotted circle) ඉවත් කරා")
     except Exception as e:
-        logger.warning(f"setup_sinhala_fonts: {e}")
+        logger.warning(f"fc-list scan error: {e}")
+
+    # 4. Patch all fonts to remove dotted circle
+    cnt = patch_all_sinhala_fonts()
+    try:
+        subprocess.run(["fc-cache", "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    if cnt > 0:
+        logger.info(f"✅ සිංහල Fonts {cnt} ක ◌ (Dotted circle) ඉවත් කරා — පිල්ලම් කැඩෙන එක වැළකේ")
 
 
 def installed_families():
@@ -778,6 +815,45 @@ def installed_families():
 SI_MARKS = set("ංඃ්‍‌") | {chr(c) for c in range(0x0dcf, 0x0de0)} | {"ෲ", "ෳ"}
 ZWJ = "‍"
 HAS_SINHALA = re.compile("[඀-෿]")
+
+
+def normalize_sinhala_text(text):
+    """Normalize broken Sinhala sequences (split vowels, visual kombuva order, etc.)
+    Fixes cases like 'පො' -> 'පො', 'පේ' -> 'පේ', 'ෙපා' -> 'පො', and zero-width artifacts."""
+    if not text or not HAS_SINHALA.search(text):
+        return text
+
+    text = text.replace('\u200b', '') # remove zero-width space
+    si_cons = r'[\u0d9a-\u0dc6]'
+    
+    # 1. Post-consonant split vowel fixes (very common in subtitle files):
+    # Consonant + ෙ + ා + ් -> Consonant + ෝ
+    text = re.sub(rf'({si_cons})\u0dd9\u0dcf\u0dca', lambda m: m.group(1) + '\u0ddd', text)
+    # Consonant + ෙ + ා -> Consonant + ො
+    text = re.sub(rf'({si_cons})\u0dd9\u0dcf', lambda m: m.group(1) + '\u0ddc', text)
+    # Consonant + ො + ් -> Consonant + ෝ
+    text = re.sub(rf'({si_cons})\u0ddc\u0dca', lambda m: m.group(1) + '\u0ddd', text)
+    # Consonant + ේ + ා -> Consonant + ෝ
+    text = re.sub(rf'({si_cons})\u0dda\u0dcf', lambda m: m.group(1) + '\u0ddd', text)
+    # Consonant + ෙ + ් -> Consonant + ේ
+    text = re.sub(rf'({si_cons})\u0dd9\u0dca', lambda m: m.group(1) + '\u0dda', text)
+    # Consonant + ෙ + ෙ -> Consonant + ෛ
+    text = re.sub(rf'({si_cons})\u0dd9\u0dd9', lambda m: m.group(1) + '\u0ddb', text)
+    # Consonant + ෙ + ෟ -> Consonant + ෞ
+    text = re.sub(rf'({si_cons})\u0dd9\u0ddf', lambda m: m.group(1) + '\u0dde', text)
+
+    # 2. Pre-consonant visual kombuva (only at start of line, word boundary, or after whitespace/punctuation/tags):
+    boundary = r'(?:^|[\s\(\[\{\<\,\.\:\;\!\?\"\'\-]|\{\\[^}]+\}|[^\u0d80-\u0dff])'
+    # ෙ + Consonant + ා + ් -> Consonant + ෝ
+    text = re.sub(rf'({boundary})\u0dd9({si_cons})\u0dcf\u0dca', lambda m: m.group(1) + m.group(2) + '\u0ddd', text)
+    # ෙ + Consonant + ා -> Consonant + ො
+    text = re.sub(rf'({boundary})\u0dd9({si_cons})\u0dcf', lambda m: m.group(1) + m.group(2) + '\u0ddc', text)
+    # ෙ + Consonant + ් -> Consonant + ේ
+    text = re.sub(rf'({boundary})\u0dd9({si_cons})\u0dca', lambda m: m.group(1) + m.group(2) + '\u0dda', text)
+    # ෙ + Consonant -> Consonant + ෙ
+    text = re.sub(rf'({boundary})\u0dd9({si_cons})', lambda m: m.group(1) + m.group(2) + '\u0dd9', text)
+    
+    return text
 
 
 def merge_sinhala_marks(text):
@@ -830,7 +906,8 @@ def prep_ass(src, dst):
             if HAS_SINHALA.search(parts[text_idx]):
                 st_idx = ev_cols.index("style") if "style" in ev_cols else 3
                 si_styles.add(parts[st_idx].strip().lstrip("*").lower())
-                new = merge_sinhala_marks(parts[text_idx])
+                norm = normalize_sinhala_text(parts[text_idx])
+                new = merge_sinhala_marks(norm)
                 if new != parts[text_idx]:
                     merged += 1
                     parts[text_idx] = new
@@ -838,7 +915,7 @@ def prep_ass(src, dst):
 
     # ---- Pass 2: නැති Fonts ආදේශ කරනවා ----
     fams = installed_families()
-    si_font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else "Noto Sans"
+    si_font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else ("Abhaya Libre" if "abhaya libre" in fams else "Noto Sans")
     latin_font = "Noto Sans" if "noto sans" in fams else si_font
     replaced, spacing_fixed = set(), set()
 
@@ -925,7 +1002,7 @@ def srt_to_ass(src, dst, w, h):
                 break
 
     fams = installed_families()
-    font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else "Noto Sans"
+    font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else ("Abhaya Libre" if "abhaya libre" in fams else "Noto Sans")
     size = max(18, round(h * 0.058))
     ass = (f"[Script Info]\nScriptType: v4.00+\nPlayResX: {w}\nPlayResY: {h}\nWrapStyle: 0\n"
            "ScaledBorderAndShadow: yes\n\n[V4+ Styles]\n"
@@ -947,13 +1024,39 @@ async def extract_attachments_and_fonts(video_path):
     temp_fonts_dir = os.path.join(os.path.dirname(video_path), f"temp_fonts_{int(time.time())}_{random.randint(100,999)}")
     os.makedirs(temp_fonts_dir, exist_ok=True)
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-dump_attachment:t", "", "-i", video_path,
-            cwd=temp_fonts_dir,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL
-        )
-        await proc.communicate()
+        extracted_via_mkv = False
+        if video_path.lower().endswith(".mkv"):
+            try:
+                proc_meta = await asyncio.create_subprocess_exec(
+                    "mkvmerge", "-J", video_path,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+                )
+                stdout, _ = await proc_meta.communicate()
+                info = json.loads(stdout or b"{}")
+                att_args = []
+                for att in info.get("attachments", []):
+                    aid = att.get("id")
+                    aname = att.get("file_name", f"font_{aid}.ttf")
+                    if aname.lower().endswith((".ttf", ".otf", ".ttc")):
+                        att_args.append(f"{aid}:{os.path.join(temp_fonts_dir, aname)}")
+                if att_args:
+                    proc_ex = await asyncio.create_subprocess_exec(
+                        "mkvextract", "attachments", video_path, *att_args,
+                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                    )
+                    await proc_ex.communicate()
+                    extracted_via_mkv = True
+            except Exception as e:
+                logger.warning(f"mkvextract extraction warning: {e}")
+
+        if not extracted_via_mkv:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-dump_attachment:t", "", "-i", video_path,
+                cwd=temp_fonts_dir,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.communicate()
         
         fonts_found = False
         for root, _, files in os.walk(temp_fonts_dir):
