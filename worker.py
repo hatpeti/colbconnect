@@ -1443,7 +1443,7 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
         elif resolution in [1080, "1080"]:
             scale = "scale=-2:'min(1080,ih)'"
             res_str = "1080p"
-            tb = min(tb, 1_400_000 if hevc_10bit else 2_200_000)
+            tb = min(tb, 1_800_000 if hevc_10bit else 2_800_000)
         elif resolution in [720, "720"]:
             scale = "scale=-2:'min(720,ih)'"
             res_str = "720p"
@@ -1453,8 +1453,8 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
             res_str = "480p"
             tb = min(tb, 380_000 if hevc_10bit else 600_000)
         else:
-            if hevc_10bit:
-                tb = min(tb, 1_800_000)
+            # Original resolution: keep master original high bitrate (~1.7 GB)
+            tb = max(tb, info.get("v_bps", 3_000_000))
 
         pix_fmt_filter = "format=p010le" if hevc_10bit else "format=yuv420p"
         if scale:
@@ -1467,8 +1467,10 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
             a_opts = [["-c:a", "aac", "-b:a", "128k"]]
         elif resolution in [720, "720"]:
             a_opts = [["-c:a", "aac", "-b:a", "160k"]]
+        elif resolution in [1080, "1080"]:
+            a_opts = [["-c:a", "aac", "-b:a", "160k"]]
         else:
-            copy_ok = all(a in ("aac", "mp3", "opus") for a in info.get("acodecs", []))
+            copy_ok = all(a in ("aac", "mp3", "opus") for a in info.get("acodecs", [])) or output_path.lower().endswith(".mkv")
             a_opts = ([["-c:a", "copy"]] if copy_ok else []) + [["-c:a", "aac", "-b:a", "160k"]]
         gpu_enc = detect_gpu_encoder()
         attempts = []
