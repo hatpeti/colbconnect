@@ -991,8 +991,7 @@ def prep_ass(src, dst, emb=None):
             if HAS_SINHALA.search(parts[text_idx]):
                 st_idx = ev_cols.index("style") if "style" in ev_cols else 3
                 si_styles.add(parts[st_idx].strip().lstrip("*").lower())
-                merged_line = merge_sinhala_marks(parts[text_idx])
-                new = normalize_sinhala_text(merged_line)
+                new = merge_sinhala_marks(parts[text_idx])
                 if new != parts[text_idx]:
                     merged += 1
                     parts[text_idx] = new
@@ -1000,12 +999,7 @@ def prep_ass(src, dst, emb=None):
 
     # ---- Pass 2: නැති Fonts ආදේශ කරනවා ----
     fams = installed_families()
-    if "noto sans sinhala" in fams:
-        si_font = "Noto Sans Sinhala"
-    elif "lklug" in fams:
-        si_font = "LKLUG"
-    else:
-        si_font = "Noto Sans"
+    si_font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else "Noto Sans"
     latin_font = "Noto Sans" if "noto sans" in fams else si_font
     replaced, spacing_fixed, used_emb = set(), set(), set()
     en_override = {}   # සිංහල Style එකක English-only Line වලට යෙදිය යුතු Embedded English Font
@@ -1068,24 +1062,6 @@ def prep_ass(src, dst, emb=None):
                 line = re.sub(r"\\fn([^\\}]+)", lambda m: "\\fn" + fix(m.group(1), sinhala), line)
             if sinhala and "\\fsp" in line:
                 line = re.sub(r"\\fsp[-+]?[\d.]*", r"\\fsp0", line)
-            if sinhala and low.startswith("dialogue:") and ev_cols:
-                head, body = line.split(":", 1)
-                parts = body.lstrip().split(",", text_idx)
-                if len(parts) > text_idx and re.search(r"[A-Za-z]", parts[text_idx]):
-                    toks = re.split(r"(\{[^}]*\}|\\[Nnh])", parts[text_idx])
-                    has_change = False
-                    for idx_t, tok in enumerate(toks):
-                        if not tok or tok.startswith("{") or tok.startswith("\\"):
-                            continue
-                        def _repl_latin(m):
-                            return "{\\fn" + latin_font + "}" + m.group(0) + "{\\fn" + si_font + "}"
-                        new_tok = re.sub(r'\(?[A-Za-z][A-Za-z0-9\s.,\'"?!/\-_:;()]*[A-Za-z0-9)]|\b[A-Za-z]\b', _repl_latin, tok)
-                        if new_tok != tok:
-                            toks[idx_t] = new_tok
-                            has_change = True
-                    if has_change:
-                        parts[text_idx] = "".join(toks)
-                        line = head + ": " + ",".join(parts)
             lines[n] = line
 
     with open(dst, "w", encoding="utf-8", newline="\n") as f:
@@ -1308,7 +1284,7 @@ async def extract_and_prep_subtitles(video_path, width, height, sub_path=None):
     temp_dir = os.path.join(os.path.dirname(video_path), f"temp_sub_{int(time.time())}_{random.randint(100,999)}")
     os.makedirs(temp_dir, exist_ok=True)
     
-    # 1. Setup vfonts directory inside temp_dir
+        # 1. Setup vfonts directory inside temp_dir
     vfonts = os.path.join(temp_dir, "vfonts")
     os.makedirs(vfonts, exist_ok=True)
     
@@ -1323,16 +1299,6 @@ async def extract_and_prep_subtitles(video_path, width, height, sub_path=None):
                     shutil.copy2(os.path.join(FONT_DIR, fn), vfonts)
                 except Exception:
                     pass
-    # Copy Noto Sans / DejaVu Sans so clean Latin fonts are available directly in vfonts
-    for noto_dir in ["/usr/share/fonts/truetype/noto", "/usr/share/fonts/opentype/noto", "/usr/share/fonts/truetype/dejavu"]:
-        if os.path.isdir(noto_dir):
-            for fn in os.listdir(noto_dir):
-                if (fn.lower().startswith("notosans-") or fn.lower().startswith("dejavusans")) and fn.lower().endswith((".ttf", ".otf")):
-                    if not os.path.exists(os.path.join(vfonts, fn)):
-                        try:
-                            shutil.copy2(os.path.join(noto_dir, fn), vfonts)
-                        except Exception:
-                            pass
     
     # 4. Subtitle extraction
     raw_sub = None
@@ -1388,19 +1354,8 @@ async def extract_and_prep_subtitles(video_path, width, height, sub_path=None):
         ass_input = converted_ass
 
     prepped_ass = os.path.join(temp_dir, "sub.ass")
-    replaced, merged, used_emb = await asyncio.to_thread(prep_ass, ass_input, prepped_ass, emb)
+    await asyncio.to_thread(prep_ass, ass_input, prepped_ass, emb)
     
-    # Remove unused embedded comic fonts from vfonts to prevent libass from falling back to them
-    used_lower = {u.lower() for u in (used_emb or [])}
-    for fn in os.listdir(vfonts):
-        if fn.startswith("emb_") and fn.lower().endswith((".ttf", ".otf", ".ttc")):
-            is_used = any(u in fn.lower() for u in used_lower)
-            if not is_used:
-                try:
-                    os.remove(os.path.join(vfonts, fn))
-                except Exception:
-                    pass
-                    
     return prepped_ass, vfonts, temp_dir
 
 
