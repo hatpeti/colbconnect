@@ -24,6 +24,57 @@ try:
 except Exception:
     pass
 
+FONT_DIR = os.path.expanduser("~/.fonts")
+os.makedirs(FONT_DIR, exist_ok=True)
+
+def patch_font(path):
+    """Font එකේ U+25CC (◌ Dotted circle) Glyph එක ඉවත් කරනවා.
+    HarfBuzz ට තනි පිල්ලමකට ◌ එකතු කරන්න වෙන්නෙ Font එකේ ඒ Glyph එක තියෙනවා නම් විතරයි.
+    (Windows වල Fonts වල ඒක නැති නිසා ඒවායේ ◌ පෙනෙන්නෙ නෑ.)"""
+    try:
+        from fontTools.ttLib import TTFont, TTCollection
+        is_ttc = path.lower().endswith(".ttc")
+        obj = TTCollection(path, lazy=False) if is_ttc else TTFont(path, lazy=False)
+        changed = False
+        for f in (obj.fonts if is_ttc else [obj]):
+            cm = f.getBestCmap() or {}
+            if 0x0D9A in cm and 0x25CC in cm:
+                for t in f["cmap"].tables:
+                    t.cmap.pop(0x25CC, None)
+                changed = True
+        if changed:
+            tmp = path + ".tmp"
+            obj.save(tmp)
+            os.replace(tmp, path)
+        return changed
+    except Exception:
+        return False
+
+
+def patch_all_sinhala_fonts():
+    n = 0
+    files = set()
+    try:
+        res = subprocess.run("fc-list :lang=si file", shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in res.stdout.splitlines():
+            parts = line.split(":")
+            if parts:
+                files.add(parts[0].strip())
+    except Exception:
+        pass
+    if os.path.isdir(FONT_DIR):
+        files |= {os.path.join(FONT_DIR, x) for x in os.listdir(FONT_DIR)
+                  if x.lower().endswith((".ttf", ".otf", ".ttc"))}
+    for f in files:
+        if f and os.path.isfile(f) and patch_font(f):
+            n += 1
+    try:
+        subprocess.run(["fc-cache", "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    return n
+
+
 def install_everything():
     print("=" * 65, flush=True)
     print("🚀  Sinhala ASS Karaoke Burner Worker  —  Setup පටන් ගන්නවා", flush=True)
@@ -812,56 +863,6 @@ async def encode_video(input_path, output_path, resolution, total_duration, task
 # ----------------------------------------------------------------------------
 #  SINHALA SUBTITLE & FONT PROCESSING (Ported directly from bot.py)
 # ----------------------------------------------------------------------------
-def patch_font(path):
-    """Font එකේ U+25CC (◌ Dotted circle) Glyph එක ඉවත් කරනවා.
-    HarfBuzz ට තනි පිල්ලමකට ◌ එකතු කරන්න වෙන්නෙ Font එකේ ඒ Glyph එක තියෙනවා නම් විතරයි.
-    (Windows වල Fonts වල ඒක නැති නිසා ඒවායේ ◌ පෙනෙන්නෙ නෑ.)"""
-    try:
-        from fontTools.ttLib import TTFont, TTCollection
-        is_ttc = path.lower().endswith(".ttc")
-        obj = TTCollection(path, lazy=False) if is_ttc else TTFont(path, lazy=False)
-        changed = False
-        for f in (obj.fonts if is_ttc else [obj]):
-            cm = f.getBestCmap() or {}
-            if 0x0D9A in cm and 0x25CC in cm:
-                for t in f["cmap"].tables:
-                    t.cmap.pop(0x25CC, None)
-                changed = True
-        if changed:
-            tmp = path + ".tmp"
-            obj.save(tmp)
-            os.replace(tmp, path)
-            logger.info(f"✅ Font Patched (removed ◌): {os.path.basename(path)}")
-        return changed
-    except Exception as e:
-        logger.warning(f"Font Patch අසාර්ථකයි ({os.path.basename(path)}): {e}")
-        return False
-
-
-def patch_all_sinhala_fonts():
-    n = 0
-    files = set()
-    try:
-        res = subprocess.run("fc-list :lang=si file", shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in res.stdout.splitlines():
-            parts = line.split(":")
-            if parts:
-                files.add(parts[0].strip())
-    except Exception:
-        pass
-    if os.path.isdir(FONT_DIR):
-        files |= {os.path.join(FONT_DIR, x) for x in os.listdir(FONT_DIR)
-                  if x.lower().endswith((".ttf", ".otf", ".ttc"))}
-    for f in files:
-        if f and os.path.isfile(f) and patch_font(f):
-            n += 1
-    try:
-        subprocess.run(["fc-cache", "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-    return n
-
-
 def setup_sinhala_fonts():
     os.makedirs(FONT_DIR, exist_ok=True)
 
