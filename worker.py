@@ -1433,24 +1433,28 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
         out_codec = "hevc" if hevc_10bit else "h264"
         tb = target_bitrate(info, out_codec)
 
-        # Resolution scaling
+        # Resolution scaling & anime-optimized bitrates
         scale = None
         res_str = "Original"
         if resolution in [2160, "2160", "4k", "4K"]:
             scale = "scale=-2:'min(2160,ih)'"
             res_str = "4K"
+            tb = min(tb, 4_500_000 if hevc_10bit else 7_000_000)
         elif resolution in [1080, "1080"]:
             scale = "scale=-2:'min(1080,ih)'"
             res_str = "1080p"
-            tb = min(tb, 4_500_000)
+            tb = min(tb, 1_400_000 if hevc_10bit else 2_200_000)
         elif resolution in [720, "720"]:
             scale = "scale=-2:'min(720,ih)'"
             res_str = "720p"
-            tb = min(tb, 2_200_000)
+            tb = min(tb, 750_000 if hevc_10bit else 1_200_000)
         elif resolution in [480, "480"]:
             scale = "scale=-2:'min(480,ih)'"
             res_str = "480p"
-            tb = min(tb, 1_100_000)
+            tb = min(tb, 380_000 if hevc_10bit else 600_000)
+        else:
+            if hevc_10bit:
+                tb = min(tb, 1_800_000)
 
         pix_fmt_filter = "format=p010le" if hevc_10bit else "format=yuv420p"
         if scale:
@@ -1458,12 +1462,14 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
         else:
             vf = f"ass=sub.ass:fontsdir=vfonts:shaping=complex,{pix_fmt_filter}"
 
-        # Audio options
-        copy_ok = all(a in ("aac", "mp3", "ac3", "eac3", "opus") for a in info.get("acodecs", []))
-        if output_path.lower().endswith(".mkv"):
-            copy_ok = True
-        a_opts = ([["-c:a", "copy"]] if copy_ok else []) + [["-c:a", "aac", "-b:a", "160k"]]
-
+        # Audio options - clean 128k/160k AAC for compressed resolutions to prevent bloat
+        if resolution in [480, "480"]:
+            a_opts = [["-c:a", "aac", "-b:a", "128k"]]
+        elif resolution in [720, "720"]:
+            a_opts = [["-c:a", "aac", "-b:a", "160k"]]
+        else:
+            copy_ok = all(a in ("aac", "mp3", "opus") for a in info.get("acodecs", []))
+            a_opts = ([["-c:a", "copy"]] if copy_ok else []) + [["-c:a", "aac", "-b:a", "160k"]]
         gpu_enc = detect_gpu_encoder()
         attempts = []
         if hevc_10bit:
