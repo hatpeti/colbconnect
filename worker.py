@@ -65,39 +65,10 @@ def install_everything():
     print("\n[4/4] 🎞️  Sinhala Fonts සකස් කර ◌ (Dotted circle) ඉවත් කරනවා ...", flush=True)
     font_dir = os.path.expanduser("~/.fonts")
     os.makedirs(font_dir, exist_ok=True)
-    for lklug_cand in [
-        "/usr/share/fonts/truetype/sinhala/lklug.ttf",
-        "/usr/share/fonts/truetype/lklug/lklug.ttf",
-        os.path.join(font_dir, "lklug.ttf")
-    ]:
-        if os.path.exists(lklug_cand):
-            try: os.remove(lklug_cand)
-            except Exception: pass
     subprocess.run(f"cp -n $(fc-list | grep -i sinhala | cut -d: -f1) {font_dir}/ 2>/dev/null", shell=True)
     subprocess.run("fc-cache -f", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        from fontTools.ttLib import TTFont, TTCollection
-        for fn in os.listdir(font_dir):
-            if fn.lower().endswith((".ttf", ".otf", ".ttc")):
-                p = os.path.join(font_dir, fn)
-                try:
-                    is_ttc = p.lower().endswith(".ttc")
-                    obj = TTCollection(p, lazy=False) if is_ttc else TTFont(p, lazy=False)
-                    ch = False
-                    for f in (obj.fonts if is_ttc else [obj]):
-                        cm = f.getBestCmap() or {}
-                        if 0x0D9A in cm and 0x25CC in cm:
-                            for t in f["cmap"].tables:
-                                t.cmap.pop(0x25CC, None)
-                            ch = True
-                    if ch:
-                        obj.save(p + ".tmp")
-                        os.replace(p + ".tmp", p)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    print("      ✅ සිංහල Fonts වල ◌ (Dotted circle) ඉවත් කරා — පිල්ලම් කැඩෙන එක නවතී", flush=True)
+    cnt = patch_all_sinhala_fonts()
+    print(f"      ✅ සිංහල Fonts {cnt} ක ◌ (Dotted circle) ඉවත් කරා — පිල්ලම් කැඩෙන එක නවතී", flush=True)
     print("=" * 65 + "\n", flush=True)
 
 if os.path.isdir("/content") or "COLAB_GPU" in os.environ or os.environ.get("RUN_INSTALL"):
@@ -894,58 +865,25 @@ def patch_all_sinhala_fonts():
 def setup_sinhala_fonts():
     os.makedirs(FONT_DIR, exist_ok=True)
 
-    # 1. Remove glitchy lklug font if present so fontconfig never falls back to it
-    for lklug_cand in [
-        "/usr/share/fonts/truetype/sinhala/lklug.ttf",
-        "/usr/share/fonts/truetype/lklug/lklug.ttf",
-        os.path.join(FONT_DIR, "lklug.ttf")
-    ]:
-        if os.path.exists(lklug_cand):
-            try: os.remove(lklug_cand)
-            except Exception: pass
-
-    # 2. Copy system Sinhala fonts (excluding lklug)
+    # 1. Copy system Sinhala fonts (LKLUG, etc.)
     try:
         res = subprocess.run("fc-list | grep -i sinhala | cut -d: -f1", shell=True, stdout=subprocess.PIPE, text=True)
         if res.stdout.strip():
             for f in res.stdout.strip().splitlines():
                 f = f.strip()
-                if f and os.path.isfile(f) and not f.lower().endswith("lklug.ttf"):
+                if f and os.path.isfile(f):
                     dst = os.path.join(FONT_DIR, os.path.basename(f))
                     if not os.path.exists(dst):
                         shutil.copy2(f, dst)
     except Exception as e:
         logger.warning(f"fc-list scan error: {e}")
 
-    # 3. If still no sinhala font in FONT_DIR, try fetching Noto Sans Sinhala
-    has_fonts = any(f.lower().endswith((".ttf", ".otf", ".ttc")) for f in os.listdir(FONT_DIR))
-    if not has_fonts:
-        font_urls = [
-            ("NotoSansSinhala-Regular.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Regular.ttf"),
-            ("NotoSansSinhala-Bold.ttf", "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansSinhala/NotoSansSinhala-Bold.ttf")
-        ]
-        for fname, url in font_urls:
-            dst = os.path.join(FONT_DIR, fname)
-            if not os.path.exists(dst) or os.path.getsize(dst) < 1000:
-                try:
-                    import urllib.request
-                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, timeout=8) as resp:
-                        with open(dst, "wb") as f_out:
-                            f_out.write(resp.read())
-                    logger.info(f"✅ Sinhala Font බාගත කරගන්නා ලදී: {fname}")
-                except Exception as e:
-                    logger.warning(f"Failed to fetch {fname}: {e}")
-
-    # 4. Patch all fonts to remove dotted circle
-    cnt = patch_all_sinhala_fonts()
-    logger.info(f"✅ Sinhala Fonts සූදානම් (Fonts {cnt} ක ◌ Dotted circle ඉවත් කරන ලදී)")
-
-    # 5. Patch all fonts to remove dotted circle
     try:
         subprocess.run(["fc-cache", "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+    # 2. Patch all fonts to remove dotted circle
     cnt = patch_all_sinhala_fonts()
     if cnt > 0:
         logger.info(f"✅ සිංහල Fonts {cnt} ක ◌ (Dotted circle) ඉවත් කරා — පිල්ලම් කැඩෙන එක වැළකේ")
@@ -1061,7 +999,12 @@ def prep_ass(src, dst, emb=None):
 
     # ---- Pass 2: නැති Fonts ආදේශ කරනවා ----
     fams = installed_families()
-    si_font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else "Noto Sans"
+    if "noto sans sinhala" in fams:
+        si_font = "Noto Sans Sinhala"
+    elif "lklug" in fams:
+        si_font = "LKLUG"
+    else:
+        si_font = "Noto Sans"
     latin_font = "Noto Sans" if "noto sans" in fams else si_font
     replaced, spacing_fixed, used_emb = set(), set(), set()
     en_override = {}   # සිංහල Style එකක English-only Line වලට යෙදිය යුතු Embedded English Font
@@ -1169,7 +1112,12 @@ def srt_to_ass(src, dst, w, h):
                 break
 
     fams = installed_families()
-    font = "Noto Sans Sinhala" if "noto sans sinhala" in fams else "Noto Sans"
+    if "noto sans sinhala" in fams:
+        font = "Noto Sans Sinhala"
+    elif "lklug" in fams:
+        font = "LKLUG"
+    else:
+        font = "Noto Sans"
     size = max(18, round(h * 0.058))
     ass = (f"[Script Info]\nScriptType: v4.00+\nPlayResX: {w}\nPlayResY: {h}\nWrapStyle: 0\n"
            "ScaledBorderAndShadow: yes\n\n[V4+ Styles]\n"
