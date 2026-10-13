@@ -6,9 +6,9 @@
 # ============================================================================
 import os, sys, subprocess, shutil, time
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8527387193:AAH46AGz1RJOJ6zd5at59Z_msIUuytcKDGc")
-API_ID = int(os.getenv("API_ID", 38017568))
-API_HASH = os.getenv("API_HASH", "edce8874495cfda158be92a333fa4823")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+API_ID = int(os.getenv("API_ID", ))
+API_HASH = os.getenv("API_HASH", "")
 
 WORK_ROOT = "/content/work" if os.path.isdir("/content") else os.path.abspath("work")
 FONT_DIR = os.path.expanduser("~/.fonts")
