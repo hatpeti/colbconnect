@@ -822,7 +822,7 @@ async def encode_video(input_path, output_path, resolution, total_duration, task
     res_display = "4K" if resolution in [2160, "2160", "4k", "4K"] else f"{resolution}p"
     if hevc_10bit:
         if has_nvenc:
-            vcodec = ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "hq", "-qp", cq, "-pix_fmt", "p010le"]
+            vcodec = ["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-preset", "p6", "-tune", "hq", "-qp", cq]
             action = f"⚙️ Encoding {res_display} HEVC 10b (GPU)"
         else:
             vcodec = ["-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p10le"]
@@ -1257,6 +1257,17 @@ def _hevc_simple(v, m, b):
     return ["-c:v", "hevc_nvenc", "-preset", "medium", "-rc", "vbr",
             "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b), "-tag:v", "hvc1"]
 
+def _hevc_10bit_full(v, m, b):
+    return ["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le",
+            "-preset", "p5", "-tune", "hq", "-rc", "vbr",
+            "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b),
+            "-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1", "-tag:v", "hvc1"]
+
+def _hevc_10bit_simple(v, m, b):
+    return ["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le",
+            "-preset", "medium", "-rc", "vbr",
+            "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b), "-tag:v", "hvc1"]
+
 def _h264_nv(v, m, b):
     return ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr",
             "-b:v", _v(v), "-maxrate", _v(m), "-bufsize", _v(b), "-profile:v", "high"]
@@ -1456,9 +1467,10 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
         gpu_enc = detect_gpu_encoder()
         attempts = []
         if hevc_10bit:
-            if gpu_enc and gpu_enc[1] == "hevc":
-                attempts.append((gpu_enc[2](tb, tb * 1.6, tb * 3.2), f"🔥 Hard Sub HEVC 10b {res_str} (GPU)"))
-            attempts.append((["-c:v", "libx265", "-preset", "veryfast", "-crf", "24", "-maxrate", _v(tb * 1.6), "-bufsize", _v(tb * 3.2)], f"🔥 Hard Sub HEVC 10b {res_str} (CPU)"))
+            if check_gpu():
+                attempts.append((_hevc_10bit_full(tb, tb * 1.6, tb * 3.2), f"🔥 Hard Sub HEVC 10b {res_str} (GPU p5)"))
+                attempts.append((_hevc_10bit_simple(tb, tb * 1.6, tb * 3.2), f"🔥 Hard Sub HEVC 10b {res_str} (GPU)"))
+            attempts.append((["-c:v", "libx265", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p10le", "-maxrate", _v(tb * 1.6), "-bufsize", _v(tb * 3.2)], f"🔥 Hard Sub HEVC 10b {res_str} (CPU)"))
         else:
             if gpu_enc:
                 if gpu_enc[1] == "h264":
