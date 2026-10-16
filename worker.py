@@ -731,7 +731,22 @@ async def restore_mkv_attachments_and_chapters(original_path, encoded_path):
         return encoded_path
     if not os.path.exists(original_path) or not os.path.exists(encoded_path) or os.path.abspath(original_path) == os.path.abspath(encoded_path):
         return encoded_path
+
+    # Auto-install mkvtoolnix on-demand if missing in Colab container
     if not shutil.which("mkvmerge"):
+        logger.info("📦 mkvmerge හමු නොවීය, mkvtoolnix install කරනවා...")
+        try:
+            proc_inst = await asyncio.create_subprocess_shell(
+                "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mkvtoolnix",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc_inst.communicate()
+        except Exception:
+            pass
+
+    if not shutil.which("mkvmerge"):
+        logger.warning("mkvmerge unavailable; skipping attachment merge.")
         return encoded_path
 
     try:
@@ -747,31 +762,32 @@ async def restore_mkv_attachments_and_chapters(original_path, encoded_path):
         info = json.loads(stdout.decode("utf-8", errors="ignore"))
         orig_atts = info.get("attachments", [])
         orig_chapters = info.get("chapters", [])
-        
-        # Check encoded file attachments
-        proc_enc = await asyncio.create_subprocess_exec(
-            "mkvmerge", "-J", encoded_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL
-        )
-        stdout_enc, _ = await proc_enc.communicate()
-        enc_atts = []
-        if proc_enc.returncode == 0 and stdout_enc:
-            enc_atts = json.loads(stdout_enc.decode("utf-8", errors="ignore")).get("attachments", [])
+        orig_tracks = info.get("tracks", [])
+        has_subs = any(t.get("type") == "subtitles" for t in orig_tracks)
 
-        # If original has attachments or chapters missing from encoded, inject them!
-        if (orig_atts and len(enc_atts) < len(orig_atts)) or orig_chapters:
+        # Merge all attachments, chapters, and subtitles directly from original
+        if orig_atts or orig_chapters or has_subs:
             merged_tmp = encoded_path + ".full.mkv"
-            cmd = ["mkvmerge", "-o", merged_tmp, encoded_path, "--no-video", "--no-audio", "--no-subtitles", original_path]
+            cmd = ["mkvmerge", "-o", merged_tmp]
+            if has_subs:
+                cmd.append("--no-subtitles")
+            cmd.extend(["--no-attachments", "--no-chapters", encoded_path, "--no-video", "--no-audio"])
+            if not has_subs:
+                cmd.append("--no-subtitles")
+            cmd.append(original_path)
+
             eproc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
-            await eproc.communicate()
+            stdo, stde = await eproc.communicate()
             if eproc.returncode == 0 and os.path.exists(merged_tmp) and os.path.getsize(merged_tmp) > 1000:
                 os.replace(merged_tmp, encoded_path)
-                logger.info(f"✅ Preserved all {len(orig_atts)} attachments (TTF fonts) and chapters from original into {os.path.basename(encoded_path)}")
+                logger.info(f"✅ Original එකේ සියලුම {len(orig_atts)} font attachments, subtitles සහ chapters {os.path.basename(encoded_path)} වෙත සාර්ථකව inject කළා.")
+            else:
+                err_msg = stde.decode("utf-8", errors="ignore") if stde else "Unknown error"
+                logger.warning(f"mkvmerge injection warning: {err_msg}")
     except Exception as e:
         logger.warning(f"Error restoring attachments to {encoded_path}: {e}")
     return encoded_path
@@ -1151,14 +1167,17 @@ def prep_ass(src, dst, emb=None):
         clean = name.strip().lstrip("@")
         if not clean:
             return name
+        if not sinhala:
+            # DO NOT replace English/non-Sinhala fonts! Anime stylized fonts (signs, attacks, titles) must be preserved!
+            return name
         e = emb.get(clean.lower())
-        if e and e["si" if sinhala else "latin"]:
+        if e and e["si"]:
             used_emb.add(clean)       # වීඩියෝවේ Font එකම පාවිච්චි කරනවා
             return name
         if clean.lower() in fams:
             return name
         replaced.add(clean)
-        return si_font if sinhala else latin_font
+        return si_font
 
     sec, font_idx, name_idx, sp_idx = "", 1, 0, -1
     for n, line in enumerate(lines):
@@ -1272,43 +1291,70 @@ def srt_to_ass(src, dst, w, h):
 
 
 def extract_embedded_fonts(video, dest):
-    """වීඩියෝව (MKV) ඇතුළේ Attachment විදිහට තියෙන Fonts dest එකට Extract කරලා,
-    ඒවායේ Family නම් -> {'si': සිංහල Glyphs තියෙනවද, 'latin': English Glyphs තියෙනවද} Dict එකක් දෙනවා."""
+    """Extract embedded fonts from MKV into dest directory using mkvextract / ffmpeg,
+    and return a dict of font family names."""
     os.makedirs(dest, exist_ok=True)
+    
+    # 1. Primary method: mkvextract (100% preserves original TTF/OTF font files and names)
+    if shutil.which("mkvextract") and shutil.which("mkvmerge"):
+        try:
+            r = subprocess.run(["mkvmerge", "-J", video], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+            if r.returncode == 0 and r.stdout:
+                info = json.loads(r.stdout)
+                att_args = []
+                for att in info.get("attachments", []):
+                    aid = att.get("id")
+                    afname = att.get("file_name") or f"font_{aid}.ttf"
+                    att_args.append(f"{aid}:{os.path.join(dest, afname)}")
+                if att_args:
+                    subprocess.run(["mkvextract", "attachments", video, *att_args],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        except Exception as e:
+            logger.warning(f"mkvextract font extract error: {e}")
+
+    # 2. Secondary fallback: ffmpeg -dump_attachment:t
     try:
-        r = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", video],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
-        streams = json.loads(r.stdout or b"{}").get("streams", [])
-        atts = [s for s in streams if s.get("codec_type") == "attachment"]
-        if not atts:
-            return {}
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
-        for n in range(len(atts)):
-            cmd += [f"-dump_attachment:t:{n}", os.path.join(dest, f"emb_{n}.bin")]
-        cmd += ["-i", video, "-t", "0", "-f", "null", "-"]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        existing = [f for f in os.listdir(dest) if f.lower().endswith((".ttf", ".otf", ".ttc", ".woff", ".woff2"))]
+        if not existing:
+            r = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", video],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+            streams = json.loads(r.stdout or b"{}").get("streams", [])
+            atts = [s for s in streams if s.get("codec_type") == "attachment"]
+            if atts:
+                cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+                for n in range(len(atts)):
+                    cmd += [f"-dump_attachment:t:{n}", os.path.join(dest, f"emb_{n}.bin")]
+                cmd += ["-i", video, "-t", "0", "-f", "null", "-"]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
     except Exception as e:
         logger.warning(f"Embedded Fonts Extract error: {e}")
-        return {}
 
     from fontTools.ttLib import TTFont, TTCollection
     fams = {}
+
+    # Convert any raw emb_*.bin files
     for fn in sorted(os.listdir(dest)):
-        if not fn.startswith("emb_") or not fn.endswith(".bin"):
+        if fn.startswith("emb_") and fn.endswith(".bin"):
+            p = os.path.join(dest, fn)
+            try:
+                with open(p, "rb") as fh:
+                    magic = fh.read(4)
+                ext = {b"OTTO": ".otf", b"ttcf": ".ttc", b"\x00\x01\x00\x00": ".ttf", b"true": ".ttf", b"wOFF": ".woff"}.get(magic, ".ttf")
+                np_ = p[:-4] + ext
+                os.replace(p, np_)
+            except Exception:
+                pass
+
+    # Scan and register all font families in dest
+    for fn in sorted(os.listdir(dest)):
+        if not fn.lower().endswith((".ttf", ".otf", ".ttc")):
             continue
-        p = os.path.join(dest, fn)
+        np_ = os.path.join(dest, fn)
         try:
-            with open(p, "rb") as fh:
-                magic = fh.read(4)
-            ext = {b"OTTO": ".otf", b"ttcf": ".ttc", b"\x00\x01\x00\x00": ".ttf", b"true": ".ttf"}.get(magic)
-            if not ext or os.path.getsize(p) > 30 * 1024 * 1024:
-                os.remove(p)
-                continue
-            np_ = p[:-4] + ext
-            os.replace(p, np_)
             patch_font(np_)
-            obj = TTCollection(np_, lazy=True) if ext == ".ttc" else TTFont(np_, lazy=True)
-            for f in (obj.fonts if ext == ".ttc" else [obj]):
+            is_ttc = np_.lower().endswith(".ttc")
+            obj = TTCollection(np_, lazy=True) if is_ttc else TTFont(np_, lazy=True)
+            for f in (obj.fonts if is_ttc else [obj]):
                 cm = f.getBestCmap() or {}
                 info = {"si": 0x0D9A in cm, "latin": 0x41 in cm and 0x61 in cm}
                 for rec in f["name"].names:
