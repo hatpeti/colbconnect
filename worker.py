@@ -2436,7 +2436,7 @@ async def main():
             app = Client("colab_worker", api_id=api_id, api_hash=api_hash, bot_token=bot_token, in_memory=True)
             if premium_session:
                 try:
-                    user_app = Client("colab_user", api_id=api_id, api_hash=api_hash, session_string=premium_session, in_memory=True)
+                    user_app = Client("colab_user", api_id=api_id, api_hash=api_hash, session_string=premium_session, in_memory=True, no_updates=True)
                     await user_app.start()
                     upload_client = user_app
                     logger.info("✅ Premium User Session started successfully (4GB Uploads Enabled)!")
