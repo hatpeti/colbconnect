@@ -89,16 +89,17 @@ def install_everything():
         print("      ⚠️  GPU හමු වුනේ නෑ! Runtime -> Change runtime type -> T4 GPU දාන්න.", flush=True)
         print("          (දැනට CPU වලින් Encode කරනවා)", flush=True)
 
-    print("\n[2/4] 📦 FFmpeg + සිංහල Fonts Install වෙනවා (විනාඩියක් විතර යනවා) ...", flush=True)
+    print("\n[2/4] 📦 FFmpeg + MKVToolNix + සිංහල Fonts Install වෙනවා (විනාඩියක් විතර යනවා) ...", flush=True)
     need_apt = (not shutil.which("ffmpeg")) or (not shutil.which("fc-list")) or (not shutil.which("aria2c")) or \
+               (not shutil.which("mkvpropedit")) or (not shutil.which("mkvmerge")) or \
                ("sinhala" not in (subprocess.run("fc-list", shell=True, stdout=subprocess.PIPE, text=True).stdout or "").lower())
     if need_apt:
         subprocess.run("apt-get -qq update", shell=True)
-        r = subprocess.run("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg fontconfig aria2 "
+        r = subprocess.run("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg fontconfig aria2 mkvtoolnix "
                            "fonts-noto-core fonts-lklug-sinhala", shell=True)
         if r.returncode != 0:
             print("      ❌ apt install අසාර්ථකයි.", flush=True)
-    print("      ✅ FFmpeg + Sinhala Fonts + Aria2 සූදානම්", flush=True)
+    print("      ✅ FFmpeg + MKVToolNix + Sinhala Fonts + Aria2 සූදානම්", flush=True)
 
     print("\n[3/4] 🐍 Python Libraries Install වෙනවා ...", flush=True)
     for pkg in ("wzgram", "websockets", "nest_asyncio", "aria2p", "fonttools", "tgcrypto"):
@@ -626,12 +627,17 @@ async def global_ui_loop():
             for idx, t in enumerate(chat_tasks, 1):
                 total = max(t.get("total", 1), 1)
                 current = max(0, t.get("current", 0))
+                if t.get("is_time", False):
+                    current = min(current, total)
                 pct = (current / total) * 100
                 bar, pct_clamped = make_progress_bar(pct)
 
                 if t.get("is_time", False):
                     processed_str = f"{format_time(current)} of {format_time(total)}"
-                    speed_str = f"{t.get('speed', 0.0):.2f}x"
+                    spd = t.get('speed', 0.0)
+                    if spd > 100.0 or spd < 0:
+                        spd = 1.0
+                    speed_str = f"{spd:.2f}x"
                 else:
                     processed_str = f"{format_bytes(current)} of {format_bytes(total)}"
                     speed_str = f"{format_bytes(t.get('speed', 0.0))}/s"
@@ -725,6 +731,8 @@ async def restore_mkv_attachments_and_chapters(original_path, encoded_path):
         return encoded_path
     if not os.path.exists(original_path) or not os.path.exists(encoded_path) or os.path.abspath(original_path) == os.path.abspath(encoded_path):
         return encoded_path
+    if not shutil.which("mkvmerge"):
+        return encoded_path
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -770,6 +778,8 @@ async def restore_mkv_attachments_and_chapters(original_path, encoded_path):
 
 async def apply_mkv_watermark(filepath, watermark=WATERMARK):
     if not filepath.lower().endswith(".mkv"): return filepath
+    if not shutil.which("mkvpropedit"):
+        return filepath
     try:
         probe = await probe_media_streams(filepath)
         cmd = ["mkvpropedit", filepath, "--edit", "info", "--set", f"title={watermark}"]
@@ -851,13 +861,13 @@ async def _run_ffmpeg_exec(cmd, input_path, output_path, total_duration, task_id
                 raw_sec = max(0.0, time_us / 1_000_000)
 
                 # Handle files with huge PTS timestamp offsets (e.g. broadcast epoch timestamps)
-                if initial_pts_offset is None:
-                    if raw_sec > total_duration * 1.05:
+                if raw_sec > total_duration:
+                    if initial_pts_offset is None or initial_pts_offset == 0.0:
                         initial_pts_offset = raw_sec
-                    else:
-                        initial_pts_offset = 0.0
+                    curr_sec = max(0.0, raw_sec - initial_pts_offset)
+                else:
+                    curr_sec = raw_sec
 
-                curr_sec = max(0.0, raw_sec - initial_pts_offset)
                 curr_sec = min(curr_sec, total_duration)
 
                 now = time.time()
