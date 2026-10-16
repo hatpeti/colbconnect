@@ -1579,7 +1579,7 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
         for vcodec, action in attempts:
             for aenc in a_opts:
                 cmd = [
-                    "ffmpeg", "-hide_banner", "-y", "-i", abs_input,
+                    "ffmpeg", "-hide_banner", "-y", "-avoid_negative_ts", "make_zero", "-i", abs_input,
                     "-vf", vf, *vcodec, *aenc,
                     "-map", "0:v:0", "-map", "0:a?", "-sn", "-map_chapters", "0",
                     "-progress", "pipe:1", "-nostats", "-loglevel", "error", abs_output
