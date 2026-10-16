@@ -826,6 +826,9 @@ async def _run_ffmpeg_exec(cmd, input_path, output_path, total_duration, task_id
 
     drain_task = asyncio.create_task(drain_stderr())
 
+    initial_pts_offset = None
+    curr_speed = 0.0
+
     while True:
         if cancel_flags.get(task_id):
             process.terminate()
@@ -834,21 +837,42 @@ async def _run_ffmpeg_exec(cmd, input_path, output_path, total_duration, task_id
         line = await process.stdout.readline()
         if not line: break
         line = line.decode("utf-8").strip()
-        if line.startswith("out_time_us="):
+
+        if line.startswith("speed="):
+            try:
+                s_val = line.split("=")[1].replace("x", "").strip()
+                if s_val and s_val != "N/A":
+                    curr_speed = float(s_val)
+            except Exception:
+                pass
+        elif line.startswith("out_time_us="):
             try:
                 time_us = int(line.split("=")[1])
-                curr_sec = max(0, time_us / 1_000_000)
+                raw_sec = max(0.0, time_us / 1_000_000)
+
+                # Handle files with huge PTS timestamp offsets (e.g. broadcast epoch timestamps)
+                if initial_pts_offset is None:
+                    if raw_sec > total_duration * 1.05:
+                        initial_pts_offset = raw_sec
+                    else:
+                        initial_pts_offset = 0.0
+
+                curr_sec = max(0.0, raw_sec - initial_pts_offset)
+                curr_sec = min(curr_sec, total_duration)
+
                 now = time.time()
                 elapsed = max(now - start_time, 0.001)
-                speed = curr_sec / elapsed
+                speed = curr_speed if curr_speed > 0 else (curr_sec / elapsed)
                 eta = max(total_duration - curr_sec, 0) / speed if speed > 0 else 0
+
                 if task_id in ACTIVE_TASKS:
                     ACTIVE_TASKS[task_id].update({
                         "current": curr_sec,
                         "speed": speed,
                         "eta": eta
                     })
-            except: pass
+            except Exception:
+                pass
     await process.wait()
     with contextlib.suppress(Exception):
         await drain_task
@@ -949,7 +973,7 @@ async def encode_video(input_path, output_path, resolution, total_duration, task
             ["-c:a", "copy", "-sn", "-map", "0:v:0", "-map", "0:a?", "-map_chapters", "0"]
         ]:
             cmd = [
-                "ffmpeg", "-hide_banner", "-y", "-i", input_path,
+                "ffmpeg", "-hide_banner", "-y", "-avoid_negative_ts", "make_zero", "-i", input_path,
                 "-vf", scale, *vcodec, *sub_args,
                 "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path
             ]
