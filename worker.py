@@ -907,6 +907,11 @@ async def _run_ffmpeg_exec(cmd, input_path, output_path, total_duration, task_id
         return False, err_text
     return True, ""
 
+def filter_ffmpeg_error(raw_text):
+    lines = [l for l in raw_text.splitlines() if not l.strip().startswith("x265 [info]:")]
+    filtered = "\n".join(lines).strip()
+    return filtered[-1500:] if filtered else raw_text[-1500:]
+
 async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action_name, filename, cwd=None):
     ok, err_text = await _run_ffmpeg_exec(cmd, input_path, output_path, total_duration, task_id, action_name, filename, cwd=cwd)
     if ok:
@@ -927,11 +932,11 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, tas
             if arg == "h264_nvenc":
                 cpu_cmd.append("libx264")
             elif arg == "hevc_nvenc":
-                cpu_cmd.append("libx265")
+                cpu_cmd.extend(["libx265", "-x265-params", "fast-intra=0:strong-intra-smoothing=0"])
             elif arg in ("-qp", "-cq"):
                 cpu_cmd.append("-crf")
             elif arg == "-preset" and i + 1 < len(cmd) and str(cmd[i + 1]).startswith("p"):
-                cpu_cmd.extend(["-preset", "veryfast"])
+                cpu_cmd.extend(["-preset", "fast"])
                 skip_next = True
             elif arg in ("-tune", "-rc", "-rc-lookahead", "-spatial-aq", "-temporal-aq"):
                 skip_next = True
@@ -948,9 +953,9 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, tas
         ok_cpu, err_cpu = await _run_ffmpeg_exec(cpu_cmd, input_path, output_path, total_duration, task_id, action_cpu, filename, cwd=cwd)
         if ok_cpu:
             return os.path.exists(output_path)
-        raise Exception(f"FFMPEG Failed (Both GPU & CPU):\n{err_cpu[-1000:]}")
+        raise Exception(f"FFMPEG Failed (Both GPU & CPU):\n{filter_ffmpeg_error(err_cpu)}")
 
-    raise Exception(f"FFMPEG Failed:\n{err_text[-1000:]}")
+    raise Exception(f"FFMPEG Failed:\n{filter_ffmpeg_error(err_text)}")
 
 async def encode_video(input_path, output_path, resolution, total_duration, task_id, filename, hevc_10bit=False):
     if resolution in [2160, "2160", "4k", "4K"]: scale, cq, crf = "scale=-2:'min(2160,ih)'", "26", "24"
@@ -972,8 +977,12 @@ async def encode_video(input_path, output_path, resolution, total_duration, task
                 ["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-preset", "medium", "-rc", "vbr", "-cq", cq],
                 f"⚙️ Encoding {res_display} HEVC 10b (GPU)"
             ))
+            attempts.append((
+                ["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-cq", cq],
+                f"⚙️ Encoding {res_display} HEVC 10b (GPU safe)"
+            ))
         attempts.append((
-            ["-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p10le"],
+            ["-c:v", "libx265", "-preset", "fast", "-crf", crf, "-pix_fmt", "yuv420p10le", "-x265-params", "fast-intra=0:strong-intra-smoothing=0"],
             f"⚙️ Encoding {res_display} HEVC 10b (CPU)"
         ))
     else:
@@ -994,7 +1003,6 @@ async def encode_video(input_path, output_path, resolution, total_duration, task
     last_err = None
     for vcodec, action in attempts:
         for sub_args in [
-            ["-c:a", "copy", "-c:s", "copy", "-c:t", "copy", "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?", "-map_chapters", "0"],
             ["-c:a", "copy", "-c:s", "copy", "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map_chapters", "0"],
             ["-c:a", "copy", "-sn", "-map", "0:v:0", "-map", "0:a?", "-map_chapters", "0"]
         ]:
@@ -1610,7 +1618,7 @@ async def hardsub_video(input_path, output_path, total_duration, task_id, filena
             if check_gpu():
                 attempts.append((_hevc_10bit_full(tb, tb * 1.6, tb * 3.2), f"🔥 Hard Sub HEVC 10b {res_str} (GPU p5)"))
                 attempts.append((_hevc_10bit_simple(tb, tb * 1.6, tb * 3.2), f"🔥 Hard Sub HEVC 10b {res_str} (GPU)"))
-            attempts.append((["-c:v", "libx265", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p10le", "-maxrate", _v(tb * 1.6), "-bufsize", _v(tb * 3.2)], f"🔥 Hard Sub HEVC 10b {res_str} (CPU)"))
+            attempts.append((["-c:v", "libx265", "-preset", "fast", "-crf", "24", "-pix_fmt", "yuv420p10le", "-maxrate", _v(tb * 1.6), "-bufsize", _v(tb * 3.2), "-x265-params", "fast-intra=0:strong-intra-smoothing=0"], f"🔥 Hard Sub HEVC 10b {res_str} (CPU)"))
         else:
             if gpu_enc:
                 if gpu_enc[1] == "h264":
