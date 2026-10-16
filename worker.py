@@ -719,7 +719,45 @@ async def fix_thumb_jpeg(image_path):
         pass
     return image_path
 
-async def apply_mkv_watermark(filepath, watermark=WATERMARK):
+async def remove_mkv_font_attachments(filepath):
+    """Delete all embedded font attachments (.ttf, .otf, .ttc, etc.) from an MKV file using mkvmerge & mkvpropedit."""
+    if not filepath.lower().endswith(".mkv") or not os.path.exists(filepath):
+        return filepath
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "mkvmerge", "-J", filepath,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode == 0 and stdout:
+            info = json.loads(stdout.decode("utf-8", errors="ignore"))
+            attachments = info.get("attachments", [])
+            del_args = []
+            for att in attachments:
+                att_id = att.get("id")
+                fn = (att.get("file_name") or "").lower()
+                ct = (att.get("content_type") or "").lower()
+                if att_id is not None and (
+                    fn.endswith((".ttf", ".otf", ".ttc", ".woff", ".eot"))
+                    or any(k in ct for k in ("font", "truetype", "opentype"))
+                ):
+                    del_args.extend(["--delete-attachment", str(att_id)])
+            
+            if del_args:
+                edit_cmd = ["mkvpropedit", filepath] + del_args
+                eproc = await asyncio.create_subprocess_exec(
+                    *edit_cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                await eproc.communicate()
+                logger.info(f"✅ Removed {len(del_args)//2} embedded TTF/font attachments from {os.path.basename(filepath)}")
+    except Exception as e:
+        logger.warning(f"Error removing font attachments from {filepath}: {e}")
+    return filepath
+
+async def apply_mkv_watermark(filepath, watermark=WATERMARK, remove_fonts=True):
     if not filepath.lower().endswith(".mkv"): return filepath
     try:
         probe = await probe_media_streams(filepath)
@@ -742,6 +780,10 @@ async def apply_mkv_watermark(filepath, watermark=WATERMARK):
         await proc.communicate()
     except Exception as e:
         logger.error(f"Watermark error: {e}")
+
+    if remove_fonts:
+        await remove_mkv_font_attachments(filepath)
+
     return filepath
 
 def generate_res_name(original_name, target_res):
@@ -1586,8 +1628,8 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
         filepath = new_filepath
         filename = new_filename
     
-    # 1. Apply MKV Watermark
-    filepath = await apply_mkv_watermark(filepath)
+    # 1. Apply MKV Watermark (preserve fonts on input only if doing hardsub)
+    filepath = await apply_mkv_watermark(filepath, remove_fonts=not is_hardsub)
     duration, w, h = await get_video_meta(filepath)
     
     files_to_upload = []
@@ -1758,7 +1800,13 @@ async def process_media_file(client, chat_id, filepath, action, custom_renames, 
         # Default upload (Upload Now)
         files_to_upload.append(filepath)
 
-    # 2. Upload generated files (Streamable Video for Hard Sub, Document otherwise)
+    # 2. Strip all embedded font attachments (.ttf, .otf, etc.) from all MKV files before upload
+    for f_path in files_to_upload:
+        if cancel_flags.get(task_id): break
+        if f_path.lower().endswith(".mkv"):
+            await remove_mkv_font_attachments(f_path)
+
+    # 3. Upload generated files (Streamable Video for Hard Sub, Document otherwise)
     is_hardsub = (action in ["hardsub", "hardsubhevc", "hsuball", "hsuballhevc"])
     for f_path in files_to_upload:
         if cancel_flags.get(task_id): break
