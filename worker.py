@@ -782,12 +782,52 @@ async def restore_mkv_attachments_and_chapters(original_path, encoded_path):
                 stderr=asyncio.subprocess.PIPE
             )
             stdo, stde = await eproc.communicate()
-            if eproc.returncode == 0 and os.path.exists(merged_tmp) and os.path.getsize(merged_tmp) > 1000:
+            # mkvmerge exit code 0 = success, 1 = success with warnings (output is valid and complete!)
+            if eproc.returncode in (0, 1) and os.path.exists(merged_tmp) and os.path.getsize(merged_tmp) > 1000:
                 os.replace(merged_tmp, encoded_path)
                 logger.info(f"✅ Original එකේ සියලුම {len(orig_atts)} font attachments, subtitles සහ chapters {os.path.basename(encoded_path)} වෙත සාර්ථකව inject කළා.")
             else:
                 err_msg = stde.decode("utf-8", errors="ignore") if stde else "Unknown error"
-                logger.warning(f"mkvmerge injection warning: {err_msg}")
+                logger.warning(f"mkvmerge injection warning (code {eproc.returncode}): {err_msg}")
+
+        # Verification step: Ensure no attachment from original was dropped
+        if orig_atts and shutil.which("mkvmerge") and shutil.which("mkvpropedit"):
+            proc_check = await asyncio.create_subprocess_exec(
+                "mkvmerge", "-J", encoded_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            stdout_chk, _ = await proc_check.communicate()
+            if proc_check.returncode == 0 and stdout_chk:
+                enc_info = json.loads(stdout_chk.decode("utf-8", errors="ignore"))
+                enc_att_names = set((a.get("file_name") or "").lower() for a in enc_info.get("attachments", []))
+                missing_atts = [a for a in orig_atts if (a.get("file_name") or "").lower() not in enc_att_names]
+                if missing_atts and shutil.which("mkvextract"):
+                    logger.info(f"🔍 Missing attachment {len(missing_atts)} ක් හමුවිය. Direct inject කරනවා...")
+                    temp_ext_dir = encoded_path + "_missing_fonts"
+                    os.makedirs(temp_ext_dir, exist_ok=True)
+                    try:
+                        ext_args = []
+                        for ma in missing_atts:
+                            mid = ma.get("id")
+                            mfname = ma.get("file_name") or f"font_{mid}.ttf"
+                            ext_args.append(f"{mid}:{os.path.join(temp_ext_dir, mfname)}")
+                        eproc = await asyncio.create_subprocess_exec(
+                            "mkvextract", "attachments", original_path, *ext_args,
+                            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                        )
+                        await eproc.communicate()
+                        for ma in missing_atts:
+                            mfname = ma.get("file_name") or f"font_{ma.get('id')}.ttf"
+                            fpath = os.path.join(temp_ext_dir, mfname)
+                            if os.path.exists(fpath):
+                                await (await asyncio.create_subprocess_exec(
+                                    "mkvpropedit", encoded_path, "--add-attachment", fpath,
+                                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                                )).communicate()
+                                logger.info(f"✅ Missing font '{mfname}' සාර්ථකව mkvpropedit මඟින් inject කළා.")
+                    finally:
+                        shutil.rmtree(temp_ext_dir, ignore_errors=True)
     except Exception as e:
         logger.warning(f"Error restoring attachments to {encoded_path}: {e}")
     return encoded_path
