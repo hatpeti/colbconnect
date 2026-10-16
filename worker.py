@@ -766,9 +766,20 @@ async def _run_ffmpeg_exec(cmd, input_path, output_path, total_duration, task_id
             "start_time": start_time
         })
 
+    stderr_chunks = []
+    async def drain_stderr():
+        while True:
+            chunk = await process.stderr.readline()
+            if not chunk:
+                break
+            stderr_chunks.append(chunk.decode("utf-8", errors="ignore"))
+
+    drain_task = asyncio.create_task(drain_stderr())
+
     while True:
         if cancel_flags.get(task_id):
             process.terminate()
+            drain_task.cancel()
             raise asyncio.CancelledError("Operation cancelled.")
         line = await process.stdout.readline()
         if not line: break
@@ -789,9 +800,11 @@ async def _run_ffmpeg_exec(cmd, input_path, output_path, total_duration, task_id
                     })
             except: pass
     await process.wait()
+    with contextlib.suppress(Exception):
+        await drain_task
     if process.returncode != 0:
-        err = await process.stderr.read()
-        return False, err.decode("utf-8", errors="ignore")
+        err_text = "".join(stderr_chunks)
+        return False, err_text
     return True, ""
 
 async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action_name, filename, cwd=None):
@@ -808,6 +821,9 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, tas
             if skip_next:
                 skip_next = False
                 continue
+            if arg == "-hwaccel":
+                skip_next = True
+                continue
             if arg == "h264_nvenc":
                 cpu_cmd.append("libx264")
             elif arg == "hevc_nvenc":
@@ -819,6 +835,8 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, tas
                 skip_next = True
             elif arg in ("-tune", "-rc", "-rc-lookahead", "-spatial-aq", "-temporal-aq"):
                 skip_next = True
+            elif arg == "p010le":
+                cpu_cmd.append("yuv420p10le")
             else:
                 cpu_cmd.append(arg)
         
@@ -835,30 +853,69 @@ async def run_ffmpeg_operation(cmd, input_path, output_path, total_duration, tas
     raise Exception(f"FFMPEG Failed:\n{err_text[-1000:]}")
 
 async def encode_video(input_path, output_path, resolution, total_duration, task_id, filename, hevc_10bit=False):
-    has_nvenc = check_gpu_encoder("hevc_nvenc" if hevc_10bit else "h264_nvenc")
     if resolution in [2160, "2160", "4k", "4K"]: scale, cq, crf = "scale=-2:'min(2160,ih)'", "26", "24"
     elif resolution in [1080, "1080"]: scale, cq, crf = "scale=-2:'min(1080,ih)'", "30", "28"
     elif resolution in [720, "720"]: scale, cq, crf = "scale=-2:'min(720,ih)'", "34", "32"
     else: scale, cq, crf = "scale=-2:'min(480,ih)'", "38", "36"
 
     res_display = "4K" if resolution in [2160, "2160", "4k", "4K"] else f"{resolution}p"
-    if hevc_10bit:
-        if has_nvenc:
-            vcodec = ["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-preset", "p6", "-tune", "hq", "-qp", cq]
-            action = f"⚙️ Encoding {res_display} HEVC 10b (GPU)"
-        else:
-            vcodec = ["-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p10le"]
-            action = f"⚙️ Encoding {res_display} HEVC 10b (CPU)"
-    else:
-        if has_nvenc:
-            vcodec = ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-cq", cq, "-pix_fmt", "yuv420p"]
-            action = f"⚙️ Encoding {res_display} (GPU)"
-        else:
-            vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
-            action = f"⚙️ Encoding {res_display} (CPU)"
+    has_gpu = check_gpu()
 
-    cmd = ["ffmpeg", "-y", "-hwaccel", "auto", "-i", input_path, "-vf", scale, *vcodec, "-c:a", "copy", "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?", "-map_chapters", "0", "-c:s", "copy", "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path]
-    return await run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action, filename)
+    attempts = []
+    if hevc_10bit:
+        if has_gpu:
+            attempts.append((
+                ["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", cq],
+                f"⚙️ Encoding {res_display} HEVC 10b (GPU p5)"
+            ))
+            attempts.append((
+                ["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-preset", "medium", "-rc", "vbr", "-cq", cq],
+                f"⚙️ Encoding {res_display} HEVC 10b (GPU)"
+            ))
+        attempts.append((
+            ["-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p10le"],
+            f"⚙️ Encoding {res_display} HEVC 10b (CPU)"
+        ))
+    else:
+        if has_gpu:
+            attempts.append((
+                ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", cq, "-pix_fmt", "yuv420p"],
+                f"⚙️ Encoding {res_display} (GPU p5)"
+            ))
+            attempts.append((
+                ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr", "-cq", cq, "-pix_fmt", "yuv420p"],
+                f"⚙️ Encoding {res_display} (GPU)"
+            ))
+        attempts.append((
+            ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"],
+            f"⚙️ Encoding {res_display} (CPU)"
+        ))
+
+    last_err = None
+    for vcodec, action in attempts:
+        for sub_args in [
+            ["-c:a", "copy", "-c:s", "copy", "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map_chapters", "0"],
+            ["-c:a", "copy", "-sn", "-map", "0:v:0", "-map", "0:a?", "-map_chapters", "0"]
+        ]:
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y", "-i", input_path,
+                "-vf", scale, *vcodec, *sub_args,
+                "-progress", "pipe:1", "-nostats", "-loglevel", "error", output_path
+            ]
+            if os.path.exists(output_path):
+                try: os.remove(output_path)
+                except Exception: pass
+            try:
+                ok = await run_ffmpeg_operation(cmd, input_path, output_path, total_duration, task_id, action, filename)
+                if ok and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                    return True
+            except Exception as e:
+                last_err = e
+                logger.warning(f"Encode attempt {action} with sub={'-sn' if '-sn' in sub_args else 'copy'} failed: {e}")
+
+    if last_err:
+        raise last_err
+    return False
 
 # ----------------------------------------------------------------------------
 #  SINHALA SUBTITLE & FONT PROCESSING (Ported directly from bot.py)
